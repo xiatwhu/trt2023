@@ -479,7 +479,8 @@ def output_blocks(network, weight_map, h, emb, context, control, hs):
     return h
 
 def create_df_engine(weight_map):
-    logger = trt.Logger(trt.Logger.VERBOSE)
+    # logger = trt.Logger(trt.Logger.VERBOSE)
+    logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
 

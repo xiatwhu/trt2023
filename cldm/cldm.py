@@ -19,12 +19,50 @@ from ldm.util import log_txt_as_img, exists, instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 
 
+in_unet = False
+
 class ControlledUnetModel(UNetModel):
-    def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
+
+    def run_trt(self, x, timesteps, context, control, only_mid_control, **kwargs):
         hs = []
         with torch.no_grad():
             t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+
+            bindings = [None] * (4 + len(control))
+            # in_idx = self.time_embed_trt.get_binding_index('t_emb')
+            # x
+            bindings[0] = x.contiguous().data_ptr()
+            self.time_embed_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
+            # t_emb
+            bindings[1] = t_emb.contiguous().data_ptr()
+            self.time_embed_trt_ctx.set_binding_shape(1, tuple([1, 320, 1, 1]))
+            # context
+            bindings[2] = context.permute((0, 2, 1)).contiguous().data_ptr()
+            self.time_embed_trt_ctx.set_binding_shape(2, tuple([1, 768, 1, 77]))
+
+            for i in range(len(control)):
+                bindings[3 + i] = control[i].contiguous().data_ptr()
+                self.time_embed_trt_ctx.set_binding_shape(3 + i, tuple(control[i].shape))
+
+            out_idx = self.time_embed_trt.get_binding_index('out')
+            emb = torch.empty(size=(1, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
+            bindings[out_idx] = emb.data_ptr()
+            self.time_embed_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
+            return emb
+
+    def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
+        global in_unet
+        in_unet = True
+        # if False:
+        if True:
+            return self.run_trt(x, timesteps, context, control, only_mid_control, **kwargs)
+
+        hs = []
+        with torch.no_grad():
+            t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+
             emb = self.time_embed(t_emb)
+
             h = x.type(self.dtype)
             for module in self.input_blocks:
                 h = module(h, emb, context)
@@ -40,7 +78,6 @@ class ControlledUnetModel(UNetModel):
             else:
                 h = torch.cat([h, hs.pop() + control.pop()], dim=1)
             h = module(h, emb, context)
-
         h = h.type(x.dtype)
         return self.out(h)
 
@@ -334,10 +371,17 @@ class ControlLDM(LatentDiffusion):
         if cond['c_concat'] is None:
             eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=None, only_mid_control=self.only_mid_control)
         else:
+            # import time
+            # torch.cuda.synchronize()
+            # t1 = time.time()
             control = self.control_model(x=x_noisy, hint=torch.cat(cond['c_concat'], 1), timesteps=t, context=cond_txt)
             control = [c * scale for c, scale in zip(control, self.control_scales)]
+            # torch.cuda.synchronize()
+            # t2 = time.time()
             eps = diffusion_model(x=x_noisy, timesteps=t, context=cond_txt, control=control, only_mid_control=self.only_mid_control)
-
+            # torch.cuda.synchronize()
+            # t3 = time.time()
+            # print(t3 - t2, t2 - t1)
         return eps
 
     @torch.no_grad()

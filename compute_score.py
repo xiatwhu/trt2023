@@ -21,6 +21,7 @@ latencys = []
 hk = hackathon()
 hk.initialize()
 for i in range(20):
+# for i in range(20):
     path = "/home/player/pictures_croped/bird_"+ str(i) + ".jpg"
     img = cv2.imread(path)
     start = datetime.datetime.now().timestamp()

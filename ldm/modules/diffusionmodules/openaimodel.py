@@ -530,6 +530,12 @@ class UNetModel(nn.Module):
             linear(time_embed_dim, time_embed_dim),
         )
 
+        import tensorrt as trt
+        trt_logger = trt.Logger(trt.Logger.VERBOSE)
+        with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
+            self.time_embed_trt = runtime.deserialize_cuda_engine(f.read())
+            self.time_embed_trt_ctx = self.time_embed_trt.create_execution_context()
+
         if self.num_classes is not None:
             if isinstance(self.num_classes, int):
                 self.label_emb = nn.Embedding(num_classes, time_embed_dim)

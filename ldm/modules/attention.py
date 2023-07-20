@@ -324,7 +324,9 @@ class SpatialTransformer(nn.Module):
             context = [context]
         b, c, h, w = x.shape
         x_in = x
+
         x = self.norm(x)
+
         if not self.use_linear:
             x = self.proj_in(x)
         x = rearrange(x, 'b c h w -> b (h w) c').contiguous()
@@ -337,5 +339,9 @@ class SpatialTransformer(nn.Module):
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
+        # from cldm.cldm import in_unet
+        # if in_unet:
+        #     print(x.shape, x+x_in)
+        #     raise RuntimeError("HHHHHHH")
         return x + x_in
 

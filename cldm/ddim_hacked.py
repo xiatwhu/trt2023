@@ -4,7 +4,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 
-from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor
+from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor, timestep_embedding
 
 
 class DDIMSampler(object):
@@ -13,6 +13,12 @@ class DDIMSampler(object):
         self.model = model
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule
+
+        import tensorrt as trt
+        trt_logger = trt.Logger(trt.Logger.VERBOSE)
+        with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
+            self.model_trt = runtime.deserialize_cuda_engine(f.read())
+            self.model_trt_ctx = self.model_trt.create_execution_context()
 
     def register_buffer(self, name, attr):
         if type(attr) == torch.Tensor:
@@ -187,9 +193,41 @@ class DDIMSampler(object):
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
             model_output = self.model.apply_model(x, t, c)
         else:
-            model_t = self.model.apply_model(x, t, c)
-            model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
-            model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
+            if True:
+                context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0)
+                hint=torch.cat(c['c_concat'], 1)
+                with torch.no_grad():
+                    t_emb = timestep_embedding(t, 320, repeat_only=False)
+
+                    bindings = [None] * (5)
+                    # in_idx = self.time_embed_trt.get_binding_index('t_emb')
+                    # x
+                    bindings[0] = x.contiguous().data_ptr()
+                    self.model_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
+                    # hint
+                    bindings[1] = hint.contiguous().data_ptr()
+                    self.model_trt_ctx.set_binding_shape(1, tuple([1, 320, 32, 48]))
+                    # t_emb
+                    bindings[2] = t_emb.contiguous().data_ptr()
+                    self.model_trt_ctx.set_binding_shape(2, tuple([1, 320, 1, 1]))
+                    # context
+                    bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
+                    # bindings[3] = context.contiguous().data_ptr()
+                    self.model_trt_ctx.set_binding_shape(3, tuple([2, 768, 1, 77]))
+
+                    out_idx = self.model_trt.get_binding_index('out')
+                    out = torch.empty(size=(2, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
+                    bindings[out_idx] = out.data_ptr()
+                    self.model_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
+
+                    model_t = out[0:1, :, :, :]
+                    model_uncond = out[1:2, :, :, :]
+
+                    model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
+            else:
+                model_t = self.model.apply_model(x, t, c)
+                model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
+                model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
         if self.model.parameterization == "v":
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)

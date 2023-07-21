@@ -14,6 +14,8 @@ from annotator.canny import CannyDetector
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
 
+# torch.backends.cuda.matmul.allow_tf32 = True
+# torch.backends.cudnn.allow_tf32 = True
 
 class hackathon():
 
@@ -36,6 +38,10 @@ class hackathon():
             control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
             control = torch.stack([control for _ in range(num_samples)], dim=0)
             control = einops.rearrange(control, 'b h w c -> b c h w').clone()
+
+            control = self.ddim_sampler.model.control_model.input_hint_block(control, None, None)
+            print(control.shape)
+            # exit(0)
 
             if seed == -1:
                 seed = random.randint(0, 65535)

@@ -35,16 +35,17 @@ def conv(network, weight_map, x, ch, pre, kernel, padding, stride):
     x.stride = (stride, stride)
     return x
 
-def input_first(network, weight_map, pre, h, emb, context):
+def input_first(network, weight_map, pre, h):
     h = conv(network, weight_map, h, 320, '{}.input_blocks.0.0'.format(pre), 3, 1, 1)
     return h
 
 def group_norm(network, weight_map, h, pre, epsilon=EPS):
+    N = h.get_output(0).shape[0]
     H = h.get_output(0).shape[2]
     W = h.get_output(0).shape[3]
 
     h = network.add_shuffle(h.get_output(0))
-    h.reshape_dims = (1, 32, -1, W)
+    h.reshape_dims = (N, 32, -1, W)
 
     # instance norm
     s = network.add_constant([1, 32, 1, 1], np.full((32), 1, dtype=np.float32))
@@ -58,7 +59,7 @@ def group_norm(network, weight_map, h, pre, epsilon=EPS):
     # n.compute_precision = trt.float16
     
     n = network.add_shuffle(n.get_output(0))
-    n.reshape_dims = (1, -1, H, W)
+    n.reshape_dims = (N, -1, H, W)
 
     n = network.add_scale(n.get_output(0), trt.ScaleMode.CHANNEL,
                           shift=weight_map['{}.bias'.format(pre)],
@@ -85,7 +86,7 @@ def layer_norm(network, weight_map, h, pre, epsilon=EPS):
 
     return n    
 
-def resblock(network, weight_map, i, ch, h, emb, context):
+def resblock(network, weight_map, i, ch, h, emb):
     ## in_layers
     # group_norm
     n = group_norm(network, weight_map, h, '{}.in_layers.0'.format(i))
@@ -93,15 +94,7 @@ def resblock(network, weight_map, i, ch, h, emb, context):
     n = silu(network, n)
     # conv_nd
     n = conv(network, weight_map, n, ch, '{}.in_layers.2'.format(i), 3, 1, 1)
-    # n = network.add_convolution(
-    #         input=n.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(3, 3),
-    #         kernel=weight_map['{}.in_layers.2.weight'.format(i)],
-    #         bias=weight_map['{}.in_layers.2.bias'.format(i)])
-    # assert n
-    # n.padding = (1, 1)
-    # n.stride = (1, 1)
+
     print('in_layers: ', n.get_output(0).shape)
 
     ## emb_layers
@@ -121,40 +114,45 @@ def resblock(network, weight_map, i, ch, h, emb, context):
     n = group_norm(network, weight_map, n, '{}.out_layers.0'.format(i))
     n = silu(network, n)
     n = conv(network, weight_map, n, ch, '{}.out_layers.3'.format(i), 3, 1, 1)
-    # n = network.add_convolution(
-    #         input=n.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(3, 3),
-    #         kernel=weight_map['{}.out_layers.3.weight'.format(i)],
-    #         bias=weight_map['{}.out_layers.3.bias'.format(i)])
-    # assert n
-    # n.padding = (1, 1)
-    # n.stride = (1, 1)
+
     print('out_layers: ', n.get_output(0).shape)
 
     in_ch = h.get_output(0).shape[1]
     if in_ch != ch:
         # skip_connection
         h = conv(network, weight_map, h, ch, '{}.skip_connection'.format(i), 1, 0, 1)
-        # h = network.add_convolution(
-        #         input=h.get_output(0),
-        #         num_output_maps=ch,
-        #         kernel_shape=(1, 1),
-        #         kernel=weight_map['{}.skip_connection.weight'.format(i)],
-        #         bias=weight_map['{}.skip_connection.bias'.format(i)])
-        # h.padding = (0, 0)
-        # h.stride = (1, 1)
 
     h = network.add_elementwise(n.get_output(0), h.get_output(0), trt.ElementWiseOperation.SUM)
     return h
 
-def self_attention(network, weight_map, i, ch, x, emb, context):
+def self_attention(network, weight_map, i, ch, x):
     h = x.get_output(0).shape[2]
     w = x.get_output(0).shape[3]
     
     heads = 8
     dim_head = ch / heads
     scale = dim_head ** -0.5
+
+    # x = network.add_shuffle(x if isinstance(x, trt.ITensor) else x.get_output(0))
+    # x.first_transpose = trt.Permutation([0, 2, 3, 1])
+    # x.reshape_dims = trt.Dims([-1, ch, 1, 1])
+    # # [2 * h * w, ch, 1, 1]
+
+    # q = network.add_fully_connected(
+    #         input=x.get_output(0),
+    #         num_outputs=ch,
+    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_q.weight'.format(i)] * scale)
+
+    # k = network.add_fully_connected(
+    #         input=x.get_output(0),
+    #         num_outputs=ch,
+    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_k.weight'.format(i)])
+
+    # v = network.add_fully_connected(
+    #         input=x.get_output(0),
+    #         num_outputs=ch,
+    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_v.weight'.format(i)])
+
     q = network.add_convolution(
             input=x.get_output(0),
             num_output_maps=ch,
@@ -179,48 +177,47 @@ def self_attention(network, weight_map, i, ch, x, emb, context):
     v.padding = (0, 0)
     v.stride = (1, 1)
 
-    # q [c, h*w] -> [head * d, h*w]
-    # k [c, h*w] -> [head * d, h*w]
-    # v [c, h*w] -> [head * d, h*w]
+    # q [2, c, h, w] -> [2 * head, h*w, d]
+    # k [2, c, h, w] -> [2 * head, h*w, d]
+    # v [2, c, h, w] -> [2 * head, h*w, d]
     q = network.add_shuffle(q.get_output(0))
-    q.reshape_dims = (8, ch // 8, -1)
+    q.reshape_dims = (16, ch // 8, -1)
+    q.second_transpose = trt.Permutation([0, 2, 1])
 
     k = network.add_shuffle(k.get_output(0))
-    k.reshape_dims = (8, ch // 8, -1)
+    k.reshape_dims = (16, ch // 8, -1)
+    k.second_transpose = trt.Permutation([0, 2, 1])
 
     v = network.add_shuffle(v.get_output(0))
-    v.reshape_dims = (8, ch // 8, -1)
+    v.reshape_dims = (16, ch // 8, -1)
+    v.second_transpose = trt.Permutation([0, 2, 1])
     print(q.get_output(0).shape)
     print(k.get_output(0).shape)
 
-    s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bki,bkj->bij')
+    s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bik,bjk->bij')
     print(s.get_output(0).shape)
     s = network.add_softmax(s.get_output(0))
     s.axes = 1<<2
 
-    out = network.add_einsum([s.get_output(0), v.get_output(0)], 'bij,bkj->bki')
+    out = network.add_einsum([s.get_output(0), v.get_output(0)], 'bij,bjk->bik')
+    # [2 * head, h * w, d] -> [2, c, h, w]
     out = network.add_shuffle(out.get_output(0))
-    out.reshape_dims = (1, ch, h, w)
+    out.first_transpose = trt.Permutation([0, 2, 1])
+    out.reshape_dims = (2, ch, h, w)
 
     # to_out
     out = conv(network, weight_map, out, ch, '{}.transformer_blocks.0.attn1.to_out.0'.format(i), 1, 0, 1)
-    # out = network.add_convolution(
-    #         input=out.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_out.0.weight'.format(i)],
-    #         bias=weight_map['{}.transformer_blocks.0.attn1.to_out.0.bias'.format(i)])
-    # out.padding = (0, 0)
-    # out.stride = (1, 1)
+
     return out
 
-def cross_attention(network, weight_map, i, ch, x, emb, context):
+def cross_attention(network, weight_map, i, ch, x, context):
     h = x.get_output(0).shape[2]
     w = x.get_output(0).shape[3]
     
     heads = 8
     dim_head = ch / heads
     scale = dim_head ** -0.5
+
     q = network.add_convolution(
             input=x.get_output(0),
             num_output_maps=ch,
@@ -245,57 +242,40 @@ def cross_attention(network, weight_map, i, ch, x, emb, context):
     v.padding = (0, 0)
     v.stride = (1, 1)
 
-    # q [c, h*w] -> [head * d, h*w]
-    # k [c, h*w] -> [head * d, h*w]
-    # v [c, h*w] -> [head * d, h*w]
     q = network.add_shuffle(q.get_output(0))
-    q.reshape_dims = (8, ch // 8, -1)
+    q.reshape_dims = (16, ch // 8, -1)
+    q.second_transpose = trt.Permutation([0, 2, 1])
 
     k = network.add_shuffle(k.get_output(0))
-    k.reshape_dims = (8, ch // 8, -1)
+    k.reshape_dims = (16, ch // 8, -1)
+    k.second_transpose = trt.Permutation([0, 2, 1])
 
     v = network.add_shuffle(v.get_output(0))
-    v.reshape_dims = (8, ch // 8, -1)
-    print(q.get_output(0).shape)
-    print(k.get_output(0).shape)
+    v.reshape_dims = (16, ch // 8, -1)
+    v.second_transpose = trt.Permutation([0, 2, 1])
 
-    s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bki,bkj->bij')
+    s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bik,bjk->bij')
     print(s.get_output(0).shape)
     s = network.add_softmax(s.get_output(0))
     s.axes = 1<<2
 
-    out = network.add_einsum([s.get_output(0), v.get_output(0)], 'bij,bkj->bki')
+    out = network.add_einsum([s.get_output(0), v.get_output(0)], 'bij,bjk->bik')
     out = network.add_shuffle(out.get_output(0))
-    out.reshape_dims = (1, ch, h, w)
+    out.first_transpose = trt.Permutation([0, 2, 1])
+    out.reshape_dims = (2, ch, h, w)
 
     # to_out
     out = conv(network, weight_map, out, ch, '{}.transformer_blocks.0.attn2.to_out.0'.format(i), 1, 0, 1)
-    # out = network.add_convolution(
-    #         input=out.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.transformer_blocks.0.attn2.to_out.0.weight'.format(i)],
-    #         bias=weight_map['{}.transformer_blocks.0.attn2.to_out.0.bias'.format(i)])
-    # out.padding = (0, 0)
-    # out.stride = (1, 1)
+
     return out
 
 def feed_forward(network, weight_map, i, ch, x):
     n = conv(network, weight_map, x, ch * 8, '{}.transformer_blocks.0.ff.net.0.proj'.format(i), 1, 0, 1)
 
-    # n = network.add_convolution(
-    #         input=x.get_output(0),
-    #         num_output_maps=ch*8,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.transformer_blocks.0.ff.net.0.proj.weight'.format(i)],
-    #         bias=weight_map['{}.transformer_blocks.0.ff.net.0.proj.bias'.format(i)])
-    # n.padding = (0, 0)
-    # n.stride = (1, 1)
-
     h = n.get_output(0).shape[2]
     w = n.get_output(0).shape[3]
-    n1 = network.add_slice(n.get_output(0), trt.Dims([0, 0, 0, 0]), trt.Dims([1, ch * 4, h, w]), trt.Dims([1, 1, 1, 1]))
-    n2 = network.add_slice(n.get_output(0), trt.Dims([0, ch * 4, 0, 0]), trt.Dims([1, ch * 4, h, w]), trt.Dims([1, 1, 1, 1]))
+    n1 = network.add_slice(n.get_output(0), trt.Dims([0, 0, 0, 0]), trt.Dims([2, ch * 4, h, w]), trt.Dims([1, 1, 1, 1]))
+    n2 = network.add_slice(n.get_output(0), trt.Dims([0, ch * 4, 0, 0]), trt.Dims([2, ch * 4, h, w]), trt.Dims([1, 1, 1, 1]))
 
     # gelu
     e = network.add_scale(n2.get_output(0), mode=trt.ScaleMode.UNIFORM, scale=trt.Weights(np.array([2 ** -0.5], np.float32)))
@@ -309,25 +289,17 @@ def feed_forward(network, weight_map, i, ch, x):
 
     n = conv(network, weight_map, n, ch, '{}.transformer_blocks.0.ff.net.2'.format(i), 1, 0, 1)
 
-    # n = network.add_convolution(
-    #         input=n.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.transformer_blocks.0.ff.net.2.weight'.format(i)],
-    #         bias=weight_map['{}.transformer_blocks.0.ff.net.2.bias'.format(i)])
-    # n.padding = (0, 0)
-    # n.stride = (1, 1)
     return n
 
-def basic_transformer(network, weight_map, i, ch, x, emb, context):
+def basic_transformer(network, weight_map, i, ch, x, context):
     # attn1
     n = layer_norm(network, weight_map, x, '{}.transformer_blocks.0.norm1'.format(i))
-    attn1 = self_attention(network, weight_map, i, ch, n, emb, context)
+    attn1 = self_attention(network, weight_map, i, ch, n)
     x = network.add_elementwise(attn1.get_output(0), x.get_output(0), trt.ElementWiseOperation.SUM)
 
     # attn2
     n = layer_norm(network, weight_map, x, '{}.transformer_blocks.0.norm2'.format(i))
-    attn2 = cross_attention(network, weight_map, i, ch, n, emb, context)
+    attn2 = cross_attention(network, weight_map, i, ch, n, context)
     x = network.add_elementwise(attn2.get_output(0), x.get_output(0), trt.ElementWiseOperation.SUM)
 
     # ff
@@ -336,53 +308,28 @@ def basic_transformer(network, weight_map, i, ch, x, emb, context):
     
     x = network.add_elementwise(ff.get_output(0), x.get_output(0), trt.ElementWiseOperation.SUM)
 
-    # TODO
     return x
 
 
-def spatial_transformer(network, weight_map, i, ch, h, emb, context):
+def spatial_transformer(network, weight_map, i, ch, h, context):
     # return h
     # norm
     n = group_norm(network, weight_map, h, '{}.norm'.format(i), 1e-6)
     # proj_in
     n = conv(network, weight_map, n, ch, '{}.proj_in'.format(i), 1, 0, 1)
 
-    # n = network.add_convolution(
-    #         input=n.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.proj_in.weight'.format(i)],
-    #         bias=weight_map['{}.proj_in.bias'.format(i)])
-    # assert n
-    # n.padding = (0, 0)
-    # n.stride = (1, 1)
-
     # BasicTransformerBlock
-    n = basic_transformer(network, weight_map, i, ch, n, emb, context)
+    n = basic_transformer(network, weight_map, i, ch, n, context)
 
     # proj_out
     n = conv(network, weight_map, n, ch, '{}.proj_out'.format(i), 1, 0, 1)
-
-    # n = network.add_convolution(
-    #         input=n.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['{}.proj_out.weight'.format(i)],
-    #         bias=weight_map['{}.proj_out.bias'.format(i)])
 
     h = network.add_elementwise(n.get_output(0), h.get_output(0), trt.ElementWiseOperation.SUM)
     return h
 
 def downsample(network, weight_map, i, ch, x):
     x = conv(network, weight_map, x, ch, '{}.op'.format(i), 3, 1, 2)
-    # x = network.add_convolution(
-    #         input=x.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(3, 3),
-    #         kernel=weight_map['{}.op.weight'.format(i)],
-    #         bias=weight_map['{}.op.bias'.format(i)])
-    # x.padding = (1, 1)
-    # x.stride = (2, 2)
+
     return x
 
 def upsample(network, weight_map, i, ch, x):
@@ -392,19 +339,14 @@ def upsample(network, weight_map, i, ch, x):
 
     x = conv(network, weight_map, x, ch, '{}.conv'.format(i), 3, 1, 1)
 
-    # x = network.add_convolution(
-    #         input=x.get_output(0),
-    #         num_output_maps=ch,
-    #         kernel_shape=(3, 3),
-    #         kernel=weight_map['{}.conv.weight'.format(i)],
-    #         bias=weight_map['{}.conv.bias'.format(i)])
-    # x.padding = (1, 1)
-    # x.stride = (1, 1)
     return x
 
 def input_block(network, weight_map, h, emb, context, model_name):
     hs = []
-    h = input_first(network, weight_map, model_name, h, emb, context)
+    h = input_first(network, weight_map, model_name, h)
+    h = network.add_slice(h.get_output(0), trt.Dims([0, 0, 0, 0]), trt.Dims([2, 320, 32, 48]), trt.Dims([1, 1, 1, 1]))
+    h.mode = trt.SliceMode.WRAP
+
     #return h
     hs.append(h)
 
@@ -417,10 +359,10 @@ def input_block(network, weight_map, h, emb, context, model_name):
         ch = model_channels * mult
         for nr in range(num_res_blocks[level]):
             pre = '{}.input_blocks.{}'.format(model_name, index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb, context)
+            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
-                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, emb, context)
+                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
             hs.append(h)
 
             # ch = mult * model_channels
@@ -450,12 +392,13 @@ def zero_convs(network, weight_map, x, i):
 
 def input_block_control(network, weight_map, h, emb, context, hint):
     hs = []
-    h = input_first(network, weight_map, 'control_model', h, emb, context)
-    print(h.get_output(0).shape)
-    h = network.add_elementwise(h.get_output(0), hint.get_output(0), trt.ElementWiseOperation.SUM)
-    print(h.get_output(0).shape)
-    print(hint.get_output(0).shape)
+    h = input_first(network, weight_map, 'control_model', h)
+    h = network.add_elementwise(h.get_output(0), hint, trt.ElementWiseOperation.SUM)
+
+    h = network.add_slice(h.get_output(0), trt.Dims([0, 0, 0, 0]), trt.Dims([2, 320, 32, 48]), trt.Dims([1, 1, 1, 1]))
+    h.mode = trt.SliceMode.WRAP
     hs.append(zero_convs(network, weight_map, h, 0))
+    # h [2, 320, 32, 48]
 
     channel_mult = [1, 2, 4, 4]
     num_res_blocks = [2] * 4
@@ -466,10 +409,10 @@ def input_block_control(network, weight_map, h, emb, context, hint):
         ch = model_channels * mult
         for nr in range(num_res_blocks[level]):
             pre = 'control_model.input_blocks.{}'.format(index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb, context)
+            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
-                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, emb, context)
+                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
             hs.append(zero_convs(network, weight_map, h, index))
 
             # ch = mult * model_channels
@@ -487,9 +430,9 @@ def input_block_control(network, weight_map, h, emb, context, hint):
 
 def middle_block(network, weight_map, h, emb, context, model_name):
     pre = '{}.middle_block'.format(model_name)
-    h = resblock(network, weight_map, '{}.0'.format(pre), 1280, h, emb, context)
-    h = spatial_transformer(network, weight_map, '{}.1'.format(pre), 1280, h, emb, context)
-    h = resblock(network, weight_map, '{}.2'.format(pre), 1280, h, emb, context)
+    h = resblock(network, weight_map, '{}.0'.format(pre), 1280, h, emb)
+    h = spatial_transformer(network, weight_map, '{}.1'.format(pre), 1280, h, context)
+    h = resblock(network, weight_map, '{}.2'.format(pre), 1280, h, emb)
     return h
 
 def output_blocks(network, weight_map, h, emb, context, control, hs):
@@ -506,10 +449,10 @@ def output_blocks(network, weight_map, h, emb, context, control, hs):
             h = network.add_concatenation([h.get_output(0), c.get_output(0)])
             print('output: ', index, h.get_output(0).shape)
             pre = 'model.diffusion_model.output_blocks.{}'.format(index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb, context)
+            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
-                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, emb, context)
+                h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
             
             if level and i == num_res_blocks[level]:
                 h = upsample(network, weight_map,
@@ -554,7 +497,7 @@ def control_net(network, weight_map, h, hint, t_emb, context):
                 bias=weight_map['control_model.time_embed.2.bias'])
     # emb [1, 1280, 1, 1]
 
-    hint = input_hint_block(network, weight_map, hint)
+    # hint = input_hint_block(network, weight_map, hint)
 
     #####################
     # input_blocks
@@ -567,14 +510,7 @@ def control_net(network, weight_map, h, hint, t_emb, context):
     #####################   
     h = middle_block(network, weight_map, h, emb, context, 'control_model')
     h = conv(network, weight_map, h, 1280, 'control_model.middle_block_out.0', 1, 0, 1)
-    # h = network.add_convolution(
-    #         input=h.get_output(0),
-    #         num_output_maps=1280,
-    #         kernel_shape=(1, 1),
-    #         kernel=weight_map['control_model.middle_block_out.0.weight'],
-    #         bias=weight_map['control_model.middle_block_out.0.bias'])
-    # h.padding = (0, 0)
-    # h.stride = (1, 1)
+
     control.append(h)
     return control
 
@@ -623,15 +559,6 @@ def unet(network, weight_map, h, t_emb, context, control):
     # conv_nd
     h = conv(network, weight_map, h, 4, 'model.diffusion_model.out.2', 3, 1, 1)
 
-    # h = network.add_convolution(
-    #         input=h.get_output(0),
-    #         num_output_maps=4,
-    #         kernel_shape=(3, 3),
-    #         kernel=weight_map['model.diffusion_model.out.2.weight'],
-    #         bias=weight_map['model.diffusion_model.out.2.bias'])
-    # assert h
-    # h.padding = (1, 1)
-    # h.stride = (1, 1)
     return h
 
 def create_df_engine(weight_map):
@@ -642,12 +569,14 @@ def create_df_engine(weight_map):
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
-    hint = network.add_input("hint", trt.float32, trt.Dims([1, 3, 256, 384]))
+    hint = network.add_input("hint", trt.float32, trt.Dims([1, 320, 32, 48]))
     t_emb = network.add_input("t_emb", trt.float32, trt.Dims([1, 320, 1, 1]))
-    context = network.add_input("context", trt.float32, trt.Dims([1, 768, 1, 77]))
+    context = network.add_input("context", trt.float32, trt.Dims([2, 768, 1, 77]))
 
     control = control_net(network, weight_map, h, hint, t_emb, context)
     x = unet(network, weight_map, h, t_emb, context, control)
+
+    print(x.get_output(0).shape)
 
     x.get_output(0).name = 'out'
     network.mark_output(x.get_output(0))

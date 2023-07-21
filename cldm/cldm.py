@@ -23,39 +23,9 @@ in_unet = False
 
 class ControlledUnetModel(UNetModel):
 
-    def run_trt(self, x, timesteps, context, control, only_mid_control, **kwargs):
-        hs = []
-        with torch.no_grad():
-            t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-
-            bindings = [None] * (4 + len(control))
-            # in_idx = self.time_embed_trt.get_binding_index('t_emb')
-            # x
-            bindings[0] = x.contiguous().data_ptr()
-            self.time_embed_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
-            # t_emb
-            bindings[1] = t_emb.contiguous().data_ptr()
-            self.time_embed_trt_ctx.set_binding_shape(1, tuple([1, 320, 1, 1]))
-            # context
-            bindings[2] = context.permute((0, 2, 1)).contiguous().data_ptr()
-            self.time_embed_trt_ctx.set_binding_shape(2, tuple([1, 768, 1, 77]))
-
-            for i in range(len(control)):
-                bindings[3 + i] = control[i].contiguous().data_ptr()
-                self.time_embed_trt_ctx.set_binding_shape(3 + i, tuple(control[i].shape))
-
-            out_idx = self.time_embed_trt.get_binding_index('out')
-            emb = torch.empty(size=(1, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
-            bindings[out_idx] = emb.data_ptr()
-            self.time_embed_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
-            return emb
-
     def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
         global in_unet
         in_unet = True
-        # if False:
-        if True:
-            return self.run_trt(x, timesteps, context, control, only_mid_control, **kwargs)
 
         hs = []
         with torch.no_grad():
@@ -351,6 +321,12 @@ class ControlLDM(LatentDiffusion):
         self.only_mid_control = only_mid_control
         self.control_scales = [1.0] * 13
 
+        import tensorrt as trt
+        trt_logger = trt.Logger(trt.Logger.VERBOSE)
+        with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
+            self.model_trt = runtime.deserialize_cuda_engine(f.read())
+            self.model_trt_ctx = self.model_trt.create_execution_context()
+
     @torch.no_grad()
     def get_input(self, batch, k, bs=None, *args, **kwargs):
         x, c = super().get_input(batch, self.first_stage_key, *args, **kwargs)
@@ -362,8 +338,40 @@ class ControlLDM(LatentDiffusion):
         control = control.to(memory_format=torch.contiguous_format).float()
         return x, dict(c_crossattn=[c], c_concat=[control])
 
+    def apply_model_trt(self, x, t, cond, *args, **kargs):
+        context = torch.cat(cond['c_crossattn'], 1)
+        hint=torch.cat(cond['c_concat'], 1)
+        with torch.no_grad():
+            t_emb = timestep_embedding(t, 320, repeat_only=False)
+
+            bindings = [None] * (5)
+            # in_idx = self.time_embed_trt.get_binding_index('t_emb')
+            # x
+            bindings[0] = x.contiguous().data_ptr()
+            self.model_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
+            # hint
+            bindings[1] = hint.contiguous().data_ptr()
+            self.model_trt_ctx.set_binding_shape(1, tuple([1, 3, 256, 384]))
+            # t_emb
+            bindings[2] = t_emb.contiguous().data_ptr()
+            self.model_trt_ctx.set_binding_shape(2, tuple([1, 320, 1, 1]))
+            # context
+            bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
+            self.model_trt_ctx.set_binding_shape(3, tuple([1, 768, 1, 77]))
+
+            out_idx = self.model_trt.get_binding_index('out')
+            out = torch.empty(size=(1, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
+            bindings[out_idx] = out.data_ptr()
+            self.model_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
+            return out
+
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)
+
+        if True:
+            eps = self.apply_model_trt(x_noisy, t, cond)
+            return eps
+
         diffusion_model = self.model.diffusion_model
 
         cond_txt = torch.cat(cond['c_crossattn'], 1)

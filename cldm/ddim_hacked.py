@@ -20,6 +20,7 @@ class DDIMSampler(object):
         with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
             self.model_trt = runtime.deserialize_cuda_engine(f.read())
             self.model_trt_ctx = self.model_trt.create_execution_context()
+
         self.context_bank = None
 
         device = torch.device('cuda')
@@ -43,6 +44,22 @@ class DDIMSampler(object):
         self.model_trt_ctx.execute_async_v3(self.stream)
         self.graph = cudart.cudaStreamEndCapture(self.stream)[1]
         self.cuda_graph_instance = cudart.cudaGraphInstantiate(self.graph, 0)[1]
+     
+        with open('df_float.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
+            self.model_trt_f = runtime.deserialize_cuda_engine(f.read())
+            self.model_trt_f_ctx = self.model_trt_f.create_execution_context()
+
+        self.model_trt_f_ctx.set_tensor_address('x', tensors[0].data_ptr())
+        self.model_trt_f_ctx.set_tensor_address('hint', tensors[1].data_ptr())
+        self.model_trt_f_ctx.set_tensor_address('t_emb', tensors[2].data_ptr())
+        self.model_trt_f_ctx.set_tensor_address('context', tensors[3].data_ptr())
+        self.model_trt_f_ctx.set_tensor_address('out', tensors[4].data_ptr())
+
+        self.model_trt_f_ctx.execute_async_v3(self.stream)
+        cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
+        self.model_trt_f_ctx.execute_async_v3(self.stream)
+        self.graph_f = cudart.cudaStreamEndCapture(self.stream)[1]
+        self.cuda_graph_f_instance = cudart.cudaGraphInstantiate(self.graph_f, 0)[1]
 
 
     def register_buffer(self, name, attr):
@@ -219,11 +236,15 @@ class DDIMSampler(object):
             model_output = self.model.apply_model(x, t, c)
         else:
             if True:
-                context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0)
-                hint=torch.cat(c['c_concat'], 1)
+
                 with torch.no_grad():
                     
                     if index == 19:
+                        control = torch.cat(c['c_concat'], 1)
+                        hint = self.model.control_model.input_hint_block(control, None, None)
+                        self.tensors[1].copy_(hint)
+
+                        context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0) 
                         context_bank = []
                         control_model = self.model.control_model
                         unet = self.model.model.diffusion_model
@@ -260,12 +281,15 @@ class DDIMSampler(object):
                     # t_emb = timestep_embedding(t, 320, repeat_only=False)
                     t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
                     self.tensors[0].copy_(x)
-                    self.tensors[1].copy_(hint)
                     self.tensors[2].copy_(t_emb)
                     torch.cuda.synchronize()
 
-                    cudart.cudaGraphLaunch(self.cuda_graph_instance, self.stream)
-                    cudart.cudaStreamSynchronize(self.stream)
+                    if index < 12:
+                        cudart.cudaGraphLaunch(self.cuda_graph_instance, self.stream)
+                        cudart.cudaStreamSynchronize(self.stream)
+                    else:
+                        cudart.cudaGraphLaunch(self.cuda_graph_f_instance, self.stream)
+                        cudart.cudaStreamSynchronize(self.stream)
                     model_t, model_uncond = self.tensors[4].chunk(2)
                     model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
             else:

@@ -40,8 +40,6 @@ class hackathon():
             control = torch.stack([control for _ in range(num_samples)], dim=0)
             control = einops.rearrange(control, 'b h w c -> b c h w').clone()
 
-            control = self.ddim_sampler.model.control_model.input_hint_block(control, None, None)
-
             if seed == -1:
                 seed = random.randint(0, 65535)
             seed_everything(seed)

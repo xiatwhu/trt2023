@@ -139,8 +139,6 @@ def layer_norm(network, weight_map, h, pre, epsilon=EPS):
         axesMask=1 << 1)
     assert n
     n.epsilon = epsilon
-    #n.num_groups = 32
-    # n.compute_precision = trt.float16
 
     return n    
 
@@ -510,20 +508,6 @@ def control_net(network, weight_map, embed_weight, h, hint, emb, context):
     # #####################
     # # time_embed
     # #####################
-    # t = network.add_fully_connected(
-    #             input=t_emb,
-    #             num_outputs=1280,
-    #             kernel=weight_map['control_model.time_embed.0.weight'],
-    #             bias=weight_map['control_model.time_embed.0.bias'])
-    # t = silu(network, t)
-    # emb = network.add_fully_connected(
-    #             input=t.get_output(0),
-    #             num_outputs=1280,
-    #             kernel=weight_map['control_model.time_embed.2.weight'],
-    #             bias=weight_map['control_model.time_embed.2.bias'])
-    # # emb [1, 1280, 1, 1]
-
-    # # hint = input_hint_block(network, weight_map, hint)
 
     #####################
     # input_blocks
@@ -545,18 +529,7 @@ def unet(network, weight_map, embed_weight, h, emb, context, control):
     # #####################
     # # time_embed
     # #####################
-    # t = network.add_fully_connected(
-    #             input=t_emb,
-    #             num_outputs=1280,
-    #             kernel=weight_map['model.diffusion_model.time_embed.0.weight'],
-    #             bias=weight_map['model.diffusion_model.time_embed.0.bias'])
-    # t = silu(network, t)
-    # emb = network.add_fully_connected(
-    #             input=t.get_output(0),
-    #             num_outputs=1280,
-    #             kernel=weight_map['model.diffusion_model.time_embed.2.weight'],
-    #             bias=weight_map['model.diffusion_model.time_embed.2.bias'])
-    # # emb [1, 1280, 1, 1]
+
 
     #####################
     # input_blocks
@@ -609,7 +582,7 @@ def create_df_engine(weight_map, embed_weight):
     
     # builder.max_batch_size = 1
     config.max_workspace_size = 2<<30
-    config.set_flag(trt.BuilderFlag.FP16)
+    # config.set_flag(trt.BuilderFlag.FP16)
     engine = builder.build_engine(network, config)
 
     del network

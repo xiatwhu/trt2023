@@ -91,12 +91,13 @@ def conv(network, weight_map, x, ch, pre, kernel, padding, stride):
     assert x
     x.padding = (padding, padding)
     x.stride = (stride, stride)
-    if ch < 1280:
-        x.precision = trt.DataType.FLOAT
+    # if ch < 1280:
+    #     x.precision = trt.DataType.FLOAT
     return x
 
 def input_first(network, weight_map, pre, h):
     h = conv(network, weight_map, h, 320, '{}.input_blocks.0.0'.format(pre), 3, 1, 1)
+    h.precision = trt.DataType.FLOAT
     return h
 
 def group_norm(network, weight_map, h, pre, epsilon=EPS):
@@ -141,7 +142,6 @@ def layer_norm(network, weight_map, h, pre, epsilon=EPS):
         axesMask=1 << 1)
     assert n
     n.epsilon = epsilon
-    n.precision = trt.DataType.FLOAT
 
     return n    
 
@@ -590,15 +590,16 @@ def create_df_engine(weight_map, embed_weight):
     x.get_output(0).name = 'out'
     network.mark_output(x.get_output(0))
 
-    for i in range(network.num_layers):
-        layer = network.get_layer(i)
-        if layer.type != trt.LayerType.CONVOLUTION:
-            network.get_layer(i).precision = trt.DataType.FLOAT
+    # for i in range(network.num_layers):
+    #     layer = network.get_layer(i)
+    #     if layer.type != trt.LayerType.CONVOLUTION:
+    #         network.get_layer(i).precision = trt.DataType.FLOAT
     
     # builder.max_batch_size = 1
     config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
     config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+    config.set_flag(trt.BuilderFlag.DIRECT_IO)
     engine = builder.build_engine(network, config)
 
     del network

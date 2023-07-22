@@ -3,9 +3,9 @@
 import torch
 import numpy as np
 from tqdm import tqdm
+from cuda import cudart
 
 from ldm.modules.diffusionmodules.util import make_ddim_sampling_parameters, make_ddim_timesteps, noise_like, extract_into_tensor, timestep_embedding
-
 
 class DDIMSampler(object):
     def __init__(self, model, schedule="linear", **kwargs):
@@ -21,6 +21,29 @@ class DDIMSampler(object):
             self.model_trt = runtime.deserialize_cuda_engine(f.read())
             self.model_trt_ctx = self.model_trt.create_execution_context()
         self.context_bank = None
+
+        device = torch.device('cuda')
+        tensors = []
+        tensors.append(torch.zeros(size=(1, 4, 32, 48), dtype=torch.float32, device=device))
+        tensors.append(torch.zeros(size=(1, 320, 32, 48), dtype=torch.float32, device=device))
+        tensors.append(torch.ones(size=(1,), dtype=torch.int32, device=device))
+        tensors.append(torch.zeros(size=(16, 77, 4560), dtype=torch.float32, device=device))
+        tensors.append(torch.zeros(size=(2, 4, 32, 48), dtype=torch.float32, device=device))
+
+        self.tensors = tensors
+        self.stream = cudart.cudaStreamCreateWithPriority(cudart.cudaStreamNonBlocking, 0)[1]
+        self.model_trt_ctx.set_tensor_address('x', tensors[0].data_ptr())
+        self.model_trt_ctx.set_tensor_address('hint', tensors[1].data_ptr())
+        self.model_trt_ctx.set_tensor_address('t_emb', tensors[2].data_ptr())
+        self.model_trt_ctx.set_tensor_address('context', tensors[3].data_ptr())
+        self.model_trt_ctx.set_tensor_address('out', tensors[4].data_ptr())
+
+        self.model_trt_ctx.execute_async_v3(self.stream)
+        cudart.cudaStreamBeginCapture(self.stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
+        self.model_trt_ctx.execute_async_v3(self.stream)
+        self.graph = cudart.cudaStreamEndCapture(self.stream)[1]
+        self.cuda_graph_instance = cudart.cudaGraphInstantiate(self.graph, 0)[1]
+
 
     def register_buffer(self, name, attr):
         if type(attr) == torch.Tensor:
@@ -201,9 +224,6 @@ class DDIMSampler(object):
                 with torch.no_grad():
                     
                     if index == 19:
-                        import time
-                        torch.cuda.synchronize()
-                        s = time.time()
                         context_bank = []
                         control_model = self.model.control_model
                         unet = self.model.model.diffusion_model
@@ -234,36 +254,19 @@ class DDIMSampler(object):
                         for i in range(len(context_bank)):
                             context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
                         self.context_bank = torch.cat(context_bank, -1)
-                        torch.cuda.synchronize()
-                        print(time.time() - s)
+
+                        self.tensors[3].copy_(self.context_bank)
 
                     # t_emb = timestep_embedding(t, 320, repeat_only=False)
                     t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
-                    bindings = [None] * (5)
-                    # in_idx = self.time_embed_trt.get_binding_index('t_emb')
-                    # x
-                    bindings[0] = x.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
-                    # hint
-                    bindings[1] = hint.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(1, tuple([1, 320, 32, 48]))
-                    # t_emb
-                    bindings[2] = t_emb.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(2, tuple([1]))
-                    # context
-                    # bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
-                    # bindings[3] = context.contiguous().data_ptr()
-                    bindings[3] = self.context_bank.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(3, tuple([16, 77, 4560]))
+                    self.tensors[0].copy_(x)
+                    self.tensors[1].copy_(hint)
+                    self.tensors[2].copy_(t_emb)
+                    torch.cuda.synchronize()
 
-                    out_idx = self.model_trt.get_binding_index('out')
-                    out = torch.empty(size=(2, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
-                    bindings[out_idx] = out.data_ptr()
-                    self.model_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
-
-                    model_t = out[0:1, :, :, :]
-                    model_uncond = out[1:2, :, :, :]
-
+                    cudart.cudaGraphLaunch(self.cuda_graph_instance, self.stream)
+                    cudart.cudaStreamSynchronize(self.stream)
+                    model_t, model_uncond = self.tensors[4].chunk(2)
                     model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
             else:
                 model_t = self.model.apply_model(x, t, c)

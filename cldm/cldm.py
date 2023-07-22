@@ -338,41 +338,8 @@ class ControlLDM(LatentDiffusion):
         control = control.to(memory_format=torch.contiguous_format).float()
         return x, dict(c_crossattn=[c], c_concat=[control])
 
-    # def apply_model_trt(self, x, t, cond, *args, **kargs):
-    #     context = torch.cat(cond['c_crossattn'], 1)
-    #     hint=torch.cat(cond['c_concat'], 1)
-    #     with torch.no_grad():
-    #         t_emb = timestep_embedding(t, 320, repeat_only=False)
-
-    #         bindings = [None] * (5)
-    #         # in_idx = self.time_embed_trt.get_binding_index('t_emb')
-    #         # x
-    #         bindings[0] = x.contiguous().data_ptr()
-    #         self.model_trt_ctx.set_binding_shape(0, tuple([1, 4, 32, 48]))
-    #         # hint
-    #         bindings[1] = hint.contiguous().data_ptr()
-    #         self.model_trt_ctx.set_binding_shape(1, tuple([1, 3, 256, 384]))
-    #         # t_emb
-    #         bindings[2] = t_emb.contiguous().data_ptr()
-    #         self.model_trt_ctx.set_binding_shape(2, tuple([1, 320, 1, 1]))
-    #         # context
-    #         # bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
-    #         bindings[3] = context.contiguous().data_ptr()
-    #         self.model_trt_ctx.set_binding_shape(3, tuple([77, 768, 1, 1]))
-
-    #         out_idx = self.model_trt.get_binding_index('out')
-    #         out = torch.empty(size=(1, 4, 32, 48), dtype=torch.float32, device=t_emb.device)
-    #         bindings[out_idx] = out.data_ptr()
-    #         self.model_trt_ctx.execute_async_v2(bindings, torch.cuda.current_stream().cuda_stream)
-    #         return out
-
     def apply_model(self, x_noisy, t, cond, *args, **kwargs):
         assert isinstance(cond, dict)
-
-        if False:
-        # if True:
-            eps = self.apply_model_trt(x_noisy, t, cond)
-            return eps
 
         diffusion_model = self.model.diffusion_model
 

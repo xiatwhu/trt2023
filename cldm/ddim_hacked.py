@@ -14,6 +14,7 @@ class DDIMSampler(object):
         self.ddpm_num_timesteps = model.num_timesteps
         self.schedule = schedule
 
+    def init_trt(self):
         import tensorrt as trt
         trt_logger = trt.Logger(trt.Logger.VERBOSE)
         with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
@@ -197,8 +198,8 @@ class DDIMSampler(object):
                 context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0)
                 hint=torch.cat(c['c_concat'], 1)
                 with torch.no_grad():
-                    t_emb = timestep_embedding(t, 320, repeat_only=False)
-
+                    # t_emb = timestep_embedding(t, 320, repeat_only=False)
+                    t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
                     bindings = [None] * (5)
                     # in_idx = self.time_embed_trt.get_binding_index('t_emb')
                     # x
@@ -209,7 +210,7 @@ class DDIMSampler(object):
                     self.model_trt_ctx.set_binding_shape(1, tuple([1, 320, 32, 48]))
                     # t_emb
                     bindings[2] = t_emb.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(2, tuple([1, 320, 1, 1]))
+                    self.model_trt_ctx.set_binding_shape(2, tuple([1]))
                     # context
                     bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
                     # bindings[3] = context.contiguous().data_ptr()

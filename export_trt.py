@@ -5,7 +5,65 @@ import numpy as np
 import tensorrt as trt
 import torch
 
+from ldm.modules.diffusionmodules.util import timestep_embedding
+
 EPS = 1e-5
+
+def compute_embedding():
+    from cldm.model import create_model, load_state_dict
+    from cldm.ddim_hacked import DDIMSampler
+    model = create_model('./models/cldm_v15.yaml').cpu()
+    model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
+    model = model.cuda()
+
+    control_model = model.control_model
+    unet = model.model.diffusion_model
+
+    embed = np.asarray(list(range(0, 1000, 50))) + 1
+    embed = torch.from_numpy(embed).type(torch.long).cuda()
+    embed = timestep_embedding(embed, 320, repeat_only=False)
+
+    # control_net
+    embed_weight = []
+    with torch.no_grad():
+        e = control_model.time_embed(embed)
+
+        # input blocks
+        index = [1, 2, 4, 5, 7, 8, 10, 11]
+        for i in index:
+            o = control_model.input_blocks[i][0].emb_layers(e)
+            embed_weight.append(o.detach().cpu().numpy())
+
+        # middle blocks
+        index = [0, 2]
+        for i in index:
+            o = control_model.middle_block[i].emb_layers(e)
+            embed_weight.append(o.detach().cpu().numpy())
+    
+    # unet
+    with torch.no_grad():
+        e = unet.time_embed(embed)
+
+        # input blocks
+        index = [1, 2, 4, 5, 7, 8, 10, 11]
+        for i in index:
+            o = unet.input_blocks[i][0].emb_layers(e)
+            embed_weight.append(o.detach().cpu().numpy())
+
+        # middle blocks
+        index = [0, 2]
+        for i in index:
+            o = unet.middle_block[i].emb_layers(e)
+            embed_weight.append(o.detach().cpu().numpy())
+        
+        # output blocks
+        index = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        for i in index:
+            o = unet.output_blocks[i][0].emb_layers(e)
+            embed_weight.append(o.detach().cpu().numpy())
+
+    del model
+    return embed_weight
 
 def load_torch_model(model_path):
     weight_map = {}
@@ -86,7 +144,7 @@ def layer_norm(network, weight_map, h, pre, epsilon=EPS):
 
     return n    
 
-def resblock(network, weight_map, i, ch, h, emb):
+def resblock(network, weight_map, embed_weight, i, ch, h, emb):
     ## in_layers
     # group_norm
     n = group_norm(network, weight_map, h, '{}.in_layers.0'.format(i))
@@ -98,14 +156,17 @@ def resblock(network, weight_map, i, ch, h, emb):
     print('in_layers: ', n.get_output(0).shape)
 
     ## emb_layers
-    # silu
-    m = silu(network, emb)
-    # linear
-    m = network.add_fully_connected(
-            m.get_output(0),
-            num_outputs=ch,
-            kernel=weight_map['{}.emb_layers.1.weight'.format(i)],
-            bias=weight_map['{}.emb_layers.1.bias'.format(i)])
+    # # silu
+    # m = silu(network, emb)
+    # # linear
+    # m = network.add_fully_connected(
+    #         m.get_output(0),
+    #         num_outputs=ch,
+    #         kernel=weight_map['{}.emb_layers.1.weight'.format(i)],
+    #         bias=weight_map['{}.emb_layers.1.bias'.format(i)])
+    # print('emb_layers: ', m.get_output(0).shape)
+    m = network.add_constant([20, ch, 1, 1], embed_weight.pop(0))
+    m = network.add_gather(m.get_output(0), emb, axis=0)
     print('emb_layers: ', m.get_output(0).shape)
 
     n = network.add_elementwise(n.get_output(0), m.get_output(0), trt.ElementWiseOperation.SUM)
@@ -133,31 +194,11 @@ def self_attention(network, weight_map, i, ch, x):
     dim_head = ch / heads
     scale = dim_head ** -0.5
 
-    # x = network.add_shuffle(x if isinstance(x, trt.ITensor) else x.get_output(0))
-    # x.first_transpose = trt.Permutation([0, 2, 3, 1])
-    # x.reshape_dims = trt.Dims([-1, ch, 1, 1])
-    # # [2 * h * w, ch, 1, 1]
-
-    # q = network.add_fully_connected(
-    #         input=x.get_output(0),
-    #         num_outputs=ch,
-    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_q.weight'.format(i)] * scale)
-
-    # k = network.add_fully_connected(
-    #         input=x.get_output(0),
-    #         num_outputs=ch,
-    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_k.weight'.format(i)])
-
-    # v = network.add_fully_connected(
-    #         input=x.get_output(0),
-    #         num_outputs=ch,
-    #         kernel=weight_map['{}.transformer_blocks.0.attn1.to_v.weight'.format(i)])
-
     q = network.add_convolution(
             input=x.get_output(0),
             num_output_maps=ch,
             kernel_shape=(1, 1),
-            kernel=weight_map['{}.transformer_blocks.0.attn1.to_q.weight'.format(i)] * scale)
+            kernel=weight_map['{}.transformer_blocks.0.attn1.to_q.weight'.format(i)])
     q.padding = (0, 0)
     q.stride = (1, 1)
 
@@ -196,6 +237,8 @@ def self_attention(network, weight_map, i, ch, x):
 
     s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bik,bjk->bij')
     print(s.get_output(0).shape)
+    s = network.add_scale(s.get_output(0), mode=trt.ScaleMode.UNIFORM,
+                          scale=trt.Weights(np.array([scale], np.float32)))
     s = network.add_softmax(s.get_output(0))
     s.axes = 1<<2
 
@@ -222,7 +265,7 @@ def cross_attention(network, weight_map, i, ch, x, context):
             input=x.get_output(0),
             num_output_maps=ch,
             kernel_shape=(1, 1),
-            kernel=weight_map['{}.transformer_blocks.0.attn2.to_q.weight'.format(i)] * scale)
+            kernel=weight_map['{}.transformer_blocks.0.attn2.to_q.weight'.format(i)])
     q.padding = (0, 0)
     q.stride = (1, 1)
 
@@ -256,6 +299,8 @@ def cross_attention(network, weight_map, i, ch, x, context):
 
     s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bik,bjk->bij')
     print(s.get_output(0).shape)
+    s = network.add_scale(s.get_output(0), mode=trt.ScaleMode.UNIFORM,
+                          scale=trt.Weights(np.array([scale], np.float32)))
     s = network.add_softmax(s.get_output(0))
     s.axes = 1<<2
 
@@ -341,7 +386,7 @@ def upsample(network, weight_map, i, ch, x):
 
     return x
 
-def input_block(network, weight_map, h, emb, context, model_name):
+def input_block(network, weight_map, embed_weight, h, emb, context, model_name):
     hs = []
     h = input_first(network, weight_map, model_name, h)
     h = network.add_slice(h.get_output(0), trt.Dims([0, 0, 0, 0]), trt.Dims([2, 320, 32, 48]), trt.Dims([1, 1, 1, 1]))
@@ -359,7 +404,7 @@ def input_block(network, weight_map, h, emb, context, model_name):
         ch = model_channels * mult
         for nr in range(num_res_blocks[level]):
             pre = '{}.input_blocks.{}'.format(model_name, index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
+            h = resblock(network, weight_map, embed_weight, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
                 h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
@@ -390,7 +435,7 @@ def zero_convs(network, weight_map, x, i):
     x.stride = (1, 1)
     return x
 
-def input_block_control(network, weight_map, h, emb, context, hint):
+def input_block_control(network, weight_map, embed_weight, h, emb, context, hint):
     hs = []
     h = input_first(network, weight_map, 'control_model', h)
     h = network.add_elementwise(h.get_output(0), hint, trt.ElementWiseOperation.SUM)
@@ -409,7 +454,7 @@ def input_block_control(network, weight_map, h, emb, context, hint):
         ch = model_channels * mult
         for nr in range(num_res_blocks[level]):
             pre = 'control_model.input_blocks.{}'.format(index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
+            h = resblock(network, weight_map, embed_weight, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
                 h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
@@ -428,14 +473,14 @@ def input_block_control(network, weight_map, h, emb, context, hint):
         # if index == 10:
     return hs, h
 
-def middle_block(network, weight_map, h, emb, context, model_name):
+def middle_block(network, weight_map, embed_weight, h, emb, context, model_name):
     pre = '{}.middle_block'.format(model_name)
-    h = resblock(network, weight_map, '{}.0'.format(pre), 1280, h, emb)
+    h = resblock(network, weight_map, embed_weight, '{}.0'.format(pre), 1280, h, emb)
     h = spatial_transformer(network, weight_map, '{}.1'.format(pre), 1280, h, context)
-    h = resblock(network, weight_map, '{}.2'.format(pre), 1280, h, emb)
+    h = resblock(network, weight_map, embed_weight, '{}.2'.format(pre), 1280, h, emb)
     return h
 
-def output_blocks(network, weight_map, h, emb, context, control, hs):
+def output_blocks(network, weight_map, embed_weight, h, emb, context, control, hs):
     channel_mult = [1, 2, 4, 4]
     num_res_blocks = [2] * 4
 
@@ -449,7 +494,7 @@ def output_blocks(network, weight_map, h, emb, context, control, hs):
             h = network.add_concatenation([h.get_output(0), c.get_output(0)])
             print('output: ', index, h.get_output(0).shape)
             pre = 'model.diffusion_model.output_blocks.{}'.format(index)
-            h = resblock(network, weight_map, '{}.0'.format(pre), ch, h, emb)
+            h = resblock(network, weight_map, embed_weight, '{}.0'.format(pre), ch, h, emb)
             print('resblock: ', h.get_output(0).shape)
             if level != len(channel_mult) -1:
                 h = spatial_transformer(network, weight_map, '{}.1'.format(pre), ch, h, context)
@@ -461,87 +506,68 @@ def output_blocks(network, weight_map, h, emb, context, control, hs):
     print(h.get_output(0).shape, len(hs), len(control), index)
     return h
 
-def input_hint_block(network, weight_map, x):
-    x = conv(network, weight_map, x, 16, 'control_model.input_hint_block.0', 3, 1, 1)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 16, 'control_model.input_hint_block.2', 3, 1, 1)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 32, 'control_model.input_hint_block.4', 3, 1, 2)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 32, 'control_model.input_hint_block.6', 3, 1, 1)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 96, 'control_model.input_hint_block.8', 3, 1, 2)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 96, 'control_model.input_hint_block.10', 3, 1, 1)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 256, 'control_model.input_hint_block.12', 3, 1, 2)
-    x = silu(network, x)
-    x = conv(network, weight_map, x, 320, 'control_model.input_hint_block.14', 3, 1, 1)
-    return x
+def control_net(network, weight_map, embed_weight, h, hint, emb, context):
+    # #####################
+    # # time_embed
+    # #####################
+    # t = network.add_fully_connected(
+    #             input=t_emb,
+    #             num_outputs=1280,
+    #             kernel=weight_map['control_model.time_embed.0.weight'],
+    #             bias=weight_map['control_model.time_embed.0.bias'])
+    # t = silu(network, t)
+    # emb = network.add_fully_connected(
+    #             input=t.get_output(0),
+    #             num_outputs=1280,
+    #             kernel=weight_map['control_model.time_embed.2.weight'],
+    #             bias=weight_map['control_model.time_embed.2.bias'])
+    # # emb [1, 1280, 1, 1]
 
-
-def control_net(network, weight_map, h, hint, t_emb, context):
-    #####################
-    # time_embed
-    #####################
-    t = network.add_fully_connected(
-                input=t_emb,
-                num_outputs=1280,
-                kernel=weight_map['control_model.time_embed.0.weight'],
-                bias=weight_map['control_model.time_embed.0.bias'])
-    t = silu(network, t)
-    emb = network.add_fully_connected(
-                input=t.get_output(0),
-                num_outputs=1280,
-                kernel=weight_map['control_model.time_embed.2.weight'],
-                bias=weight_map['control_model.time_embed.2.bias'])
-    # emb [1, 1280, 1, 1]
-
-    # hint = input_hint_block(network, weight_map, hint)
+    # # hint = input_hint_block(network, weight_map, hint)
 
     #####################
     # input_blocks
     #####################
-    control, h = input_block_control(network, weight_map, h, emb, context, hint)
+    control, h = input_block_control(network, weight_map, embed_weight, h, emb, context, hint)
     print(h.get_output(0).shape)
 
     #####################
     # middle_blocks
     #####################   
-    h = middle_block(network, weight_map, h, emb, context, 'control_model')
+    h = middle_block(network, weight_map, embed_weight, h, emb, context, 'control_model')
     h = conv(network, weight_map, h, 1280, 'control_model.middle_block_out.0', 1, 0, 1)
 
     control.append(h)
     return control
 
 
-def unet(network, weight_map, h, t_emb, context, control):
-    #####################
-    # time_embed
-    #####################
-    t = network.add_fully_connected(
-                input=t_emb,
-                num_outputs=1280,
-                kernel=weight_map['model.diffusion_model.time_embed.0.weight'],
-                bias=weight_map['model.diffusion_model.time_embed.0.bias'])
-    t = silu(network, t)
-    emb = network.add_fully_connected(
-                input=t.get_output(0),
-                num_outputs=1280,
-                kernel=weight_map['model.diffusion_model.time_embed.2.weight'],
-                bias=weight_map['model.diffusion_model.time_embed.2.bias'])
-    # emb [1, 1280, 1, 1]
+def unet(network, weight_map, embed_weight, h, emb, context, control):
+    # #####################
+    # # time_embed
+    # #####################
+    # t = network.add_fully_connected(
+    #             input=t_emb,
+    #             num_outputs=1280,
+    #             kernel=weight_map['model.diffusion_model.time_embed.0.weight'],
+    #             bias=weight_map['model.diffusion_model.time_embed.0.bias'])
+    # t = silu(network, t)
+    # emb = network.add_fully_connected(
+    #             input=t.get_output(0),
+    #             num_outputs=1280,
+    #             kernel=weight_map['model.diffusion_model.time_embed.2.weight'],
+    #             bias=weight_map['model.diffusion_model.time_embed.2.bias'])
+    # # emb [1, 1280, 1, 1]
 
     #####################
     # input_blocks
     #####################
-    hs, h = input_block(network, weight_map, h, emb, context, 'model.diffusion_model')
+    hs, h = input_block(network, weight_map, embed_weight, h, emb, context, 'model.diffusion_model')
     print(h.get_output(0).shape)
 
     #####################
     # middle_blocks
     #####################   
-    h = middle_block(network, weight_map, h, emb, context, 'model.diffusion_model')
+    h = middle_block(network, weight_map, embed_weight, h, emb, context, 'model.diffusion_model')
     print(h.get_output(0).shape)
 
     h = network.add_elementwise(h.get_output(0), control.pop().get_output(0), trt.ElementWiseOperation.SUM)
@@ -549,7 +575,7 @@ def unet(network, weight_map, h, t_emb, context, control):
     #####################
     # output_blocks
     #####################
-    h = output_blocks(network, weight_map, h, emb, context, control, hs)
+    h = output_blocks(network, weight_map, embed_weight, h, emb, context, control, hs)
 
     # out
     # group_norm
@@ -561,7 +587,7 @@ def unet(network, weight_map, h, t_emb, context, control):
 
     return h
 
-def create_df_engine(weight_map):
+def create_df_engine(weight_map, embed_weight):
     # logger = trt.Logger(trt.Logger.VERBOSE)
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
@@ -570,16 +596,17 @@ def create_df_engine(weight_map):
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
     hint = network.add_input("hint", trt.float32, trt.Dims([1, 320, 32, 48]))
-    t_emb = network.add_input("t_emb", trt.float32, trt.Dims([1, 320, 1, 1]))
+    t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
     context = network.add_input("context", trt.float32, trt.Dims([2, 768, 1, 77]))
 
-    control = control_net(network, weight_map, h, hint, t_emb, context)
-    x = unet(network, weight_map, h, t_emb, context, control)
+    control = control_net(network, weight_map, embed_weight, h, hint, t_emb, context)
+    x = unet(network, weight_map, embed_weight, h, t_emb, context, control)
 
     print(x.get_output(0).shape)
 
     x.get_output(0).name = 'out'
     network.mark_output(x.get_output(0))
+    
     # builder.max_batch_size = 1
     config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
@@ -592,7 +619,8 @@ def create_df_engine(weight_map):
 
 def convert_trt_engine(input_model_path):
     weight_map = load_torch_model(input_model_path)
-    df_engine = create_df_engine(weight_map)
+    embed_weight = compute_embedding()
+    df_engine = create_df_engine(weight_map, embed_weight)
     df_data = bytes(df_engine.serialize())
     with open('./df.plan', 'wb') as f:
         f.write(df_data)

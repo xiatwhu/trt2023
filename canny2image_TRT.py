@@ -25,6 +25,7 @@ class hackathon():
         self.model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
         self.model = self.model.cuda()
         self.ddim_sampler = DDIMSampler(self.model)
+        self.ddim_sampler.init_trt()
 
 
     def process(self, input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, ddim_steps, guess_mode, strength, scale, seed, eta, low_threshold, high_threshold):
@@ -40,8 +41,6 @@ class hackathon():
             control = einops.rearrange(control, 'b h w c -> b c h w').clone()
 
             control = self.ddim_sampler.model.control_model.input_hint_block(control, None, None)
-            print(control.shape)
-            # exit(0)
 
             if seed == -1:
                 seed = random.randint(0, 65535)

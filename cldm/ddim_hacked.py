@@ -20,6 +20,7 @@ class DDIMSampler(object):
         with open('df.plan', 'rb') as f, trt.Runtime(trt_logger) as runtime:
             self.model_trt = runtime.deserialize_cuda_engine(f.read())
             self.model_trt_ctx = self.model_trt.create_execution_context()
+        self.context_bank = None
 
     def register_buffer(self, name, attr):
         if type(attr) == torch.Tensor:
@@ -198,6 +199,44 @@ class DDIMSampler(object):
                 context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0)
                 hint=torch.cat(c['c_concat'], 1)
                 with torch.no_grad():
+                    
+                    if index == 19:
+                        import time
+                        torch.cuda.synchronize()
+                        s = time.time()
+                        context_bank = []
+                        control_model = self.model.control_model
+                        unet = self.model.model.diffusion_model
+
+                        # control net
+                        block = [1, 2, 4, 5, 7, 8]
+                        for i in block:
+                            context_bank.append(control_model.input_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
+                            context_bank.append(control_model.input_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
+                        
+                        context_bank.append(control_model.middle_block[1].transformer_blocks[0].attn2.to_k(context))
+                        context_bank.append(control_model.middle_block[1].transformer_blocks[0].attn2.to_v(context))
+
+                        # unet
+                        block = [1, 2, 4, 5, 7, 8]
+                        for i in block:
+                            context_bank.append(unet.input_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
+                            context_bank.append(unet.input_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
+
+                        context_bank.append(unet.middle_block[1].transformer_blocks[0].attn2.to_k(context))
+                        context_bank.append(unet.middle_block[1].transformer_blocks[0].attn2.to_v(context))
+
+                        block = [3, 4, 5, 6, 7, 8, 9, 10, 11]
+                        for i in block:
+                            context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
+                            context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
+                        
+                        for i in range(len(context_bank)):
+                            context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
+                        self.context_bank = torch.cat(context_bank, -1)
+                        torch.cuda.synchronize()
+                        print(time.time() - s)
+
                     # t_emb = timestep_embedding(t, 320, repeat_only=False)
                     t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
                     bindings = [None] * (5)
@@ -212,9 +251,10 @@ class DDIMSampler(object):
                     bindings[2] = t_emb.contiguous().data_ptr()
                     self.model_trt_ctx.set_binding_shape(2, tuple([1]))
                     # context
-                    bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
+                    # bindings[3] = context.permute((0, 2, 1)).contiguous().data_ptr()
                     # bindings[3] = context.contiguous().data_ptr()
-                    self.model_trt_ctx.set_binding_shape(3, tuple([2, 768, 1, 77]))
+                    bindings[3] = self.context_bank.contiguous().data_ptr()
+                    self.model_trt_ctx.set_binding_shape(3, tuple([16, 77, 4560]))
 
                     out_idx = self.model_trt.get_binding_index('out')
                     out = torch.empty(size=(2, 4, 32, 48), dtype=torch.float32, device=t_emb.device)

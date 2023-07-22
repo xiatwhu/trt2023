@@ -91,6 +91,8 @@ def conv(network, weight_map, x, ch, pre, kernel, padding, stride):
     assert x
     x.padding = (padding, padding)
     x.stride = (stride, stride)
+    if ch < 1280:
+        x.precision = trt.DataType.FLOAT
     return x
 
 def input_first(network, weight_map, pre, h):
@@ -139,6 +141,7 @@ def layer_norm(network, weight_map, h, pre, epsilon=EPS):
         axesMask=1 << 1)
     assert n
     n.epsilon = epsilon
+    n.precision = trt.DataType.FLOAT
 
     return n    
 
@@ -267,33 +270,46 @@ def cross_attention(network, weight_map, i, ch, x, context):
     q.padding = (0, 0)
     q.stride = (1, 1)
 
-    k = network.add_convolution(
-            input=context,
-            num_output_maps=ch,
-            kernel_shape=(1, 1),
-            kernel=weight_map['{}.transformer_blocks.0.attn2.to_k.weight'.format(i)])
-    k.padding = (0, 0)
-    k.stride = (1, 1)
+    # k = network.add_convolution(
+    #         input=context,
+    #         num_output_maps=ch,
+    #         kernel_shape=(1, 1),
+    #         kernel=weight_map['{}.transformer_blocks.0.attn2.to_k.weight'.format(i)])
+    # k.padding = (0, 0)
+    # k.stride = (1, 1)
 
-    v = network.add_convolution(
-            input=context,
-            num_output_maps=ch,
-            kernel_shape=(1, 1),
-            kernel=weight_map['{}.transformer_blocks.0.attn2.to_v.weight'.format(i)])
-    v.padding = (0, 0)
-    v.stride = (1, 1)
+    # v = network.add_convolution(
+    #         input=context,
+    #         num_output_maps=ch,
+    #         kernel_shape=(1, 1),
+    #         kernel=weight_map['{}.transformer_blocks.0.attn2.to_v.weight'.format(i)])
+    # v.padding = (0, 0)
+    # v.stride = (1, 1)
 
     q = network.add_shuffle(q.get_output(0))
     q.reshape_dims = (16, ch // 8, -1)
     q.second_transpose = trt.Permutation([0, 2, 1])
 
-    k = network.add_shuffle(k.get_output(0))
-    k.reshape_dims = (16, ch // 8, -1)
-    k.second_transpose = trt.Permutation([0, 2, 1])
+    dim = ch // 8
+    k = network.add_slice(context['context'],
+                          trt.Dims([0, 0, context['start']]),
+                          trt.Dims([16, 77, dim]),
+                          trt.Dims([1, 1, 1]))
+    v = network.add_slice(context['context'],
+                          trt.Dims([0, 0, context['start'] + dim]),
+                          trt.Dims([16, 77, dim]),
+                          trt.Dims([1, 1, 1]))
+    context['start'] += 2 * dim
+    print('start: ', context['start'])
+    print('cross_attn: ', q.get_output(0).shape, k.get_output(0).shape, v.get_output(0).shape)
 
-    v = network.add_shuffle(v.get_output(0))
-    v.reshape_dims = (16, ch // 8, -1)
-    v.second_transpose = trt.Permutation([0, 2, 1])
+    # k = network.add_shuffle(k.get_output(0))
+    # k.reshape_dims = (16, ch // 8, -1)
+    # k.second_transpose = trt.Permutation([0, 2, 1])
+
+    # v = network.add_shuffle(v.get_output(0))
+    # v.reshape_dims = (16, ch // 8, -1)
+    # v.second_transpose = trt.Permutation([0, 2, 1])
 
     s = network.add_einsum([q.get_output(0), k.get_output(0)], 'bik,bjk->bij')
     print(s.get_output(0).shape)
@@ -423,14 +439,7 @@ def input_block(network, weight_map, embed_weight, h, emb, context, model_name):
 
 def zero_convs(network, weight_map, x, i):
     ch = x.get_output(0).shape[1]
-    x = network.add_convolution(
-            input=x.get_output(0),
-            num_output_maps=ch,
-            kernel_shape=(1, 1),
-            kernel=weight_map['control_model.zero_convs.{}.0.weight'.format(i)],
-            bias=weight_map['control_model.zero_convs.{}.0.bias'.format(i)])
-    x.padding = (0, 0)
-    x.stride = (1, 1)
+    x = conv(network, weight_map, x, ch, 'control_model.zero_convs.{}.0'.format(i), 1, 0, 1)
     return x
 
 def input_block_control(network, weight_map, embed_weight, h, emb, context, hint):
@@ -570,8 +579,9 @@ def create_df_engine(weight_map, embed_weight):
     h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
     hint = network.add_input("hint", trt.float32, trt.Dims([1, 320, 32, 48]))
     t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
-    context = network.add_input("context", trt.float32, trt.Dims([2, 768, 1, 77]))
+    context = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
 
+    context = {'context': context, 'start': 0}
     control = control_net(network, weight_map, embed_weight, h, hint, t_emb, context)
     x = unet(network, weight_map, embed_weight, h, t_emb, context, control)
 
@@ -579,10 +589,16 @@ def create_df_engine(weight_map, embed_weight):
 
     x.get_output(0).name = 'out'
     network.mark_output(x.get_output(0))
+
+    for i in range(network.num_layers):
+        layer = network.get_layer(i)
+        if layer.type != trt.LayerType.CONVOLUTION:
+            network.get_layer(i).precision = trt.DataType.FLOAT
     
     # builder.max_batch_size = 1
     config.max_workspace_size = 2<<30
-    # config.set_flag(trt.BuilderFlag.FP16)
+    config.set_flag(trt.BuilderFlag.FP16)
+    config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
     engine = builder.build_engine(network, config)
 
     del network

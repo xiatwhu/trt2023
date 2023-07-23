@@ -20,6 +20,7 @@ scores = []
 latencys = []
 hk = hackathon()
 hk.initialize()
+
 for i in range(20):
 # for i in range(20):
     path = "/home/player/pictures_croped/bird_"+ str(i) + ".jpg"
@@ -46,5 +47,11 @@ for i in range(20):
     # generate the base_img by running the pytorch fp32 pipeline (origin code in canny2image_TRT.py)
     base_path = "base/" + new_path
     score = PD(base_path, new_path)
+    scores.append(score)
+    latencys.append((end - start) * 1000)
     print("score is: ", score)
+
+print(sum(scores) / 20, sum(latencys[1:]) / 19)
+print(scores)
+print(latencys)
 

@@ -284,7 +284,7 @@ class DDIMSampler(object):
                     self.tensors[2].copy_(t_emb)
                     torch.cuda.synchronize()
 
-                    if index < 18:
+                    if index < 15:
                         cudart.cudaGraphLaunch(self.cuda_graph_instance, self.stream)
                         cudart.cudaStreamSynchronize(self.stream)
                     else:

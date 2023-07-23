@@ -599,6 +599,7 @@ def create_df_engine(weight_map, embed_weight):
     config.max_workspace_size = 2<<30
     # config.set_flag(trt.BuilderFlag.FP16)
     # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+    config.max_aux_streams = 8
     config.set_flag(trt.BuilderFlag.DIRECT_IO)
     engine = builder.build_engine(network, config)
 

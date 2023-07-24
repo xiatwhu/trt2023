@@ -496,8 +496,8 @@ def output_blocks(network, weight_map, embed_weight, h, emb, context, control, h
     for level, mult in list(enumerate(channel_mult))[::-1]:
         ch = model_channels * mult
         for i in range(num_res_blocks[level] + 1):
-            print(control[-1].get_output(0).shape, hs[-1].get_output(0).shape, len(hs), h.get_output(0).shape)
-            c = network.add_elementwise(control.pop().get_output(0), hs.pop().get_output(0), trt.ElementWiseOperation.SUM)
+            print(control[-1].shape, hs[-1].shape, len(hs), h.get_output(0).shape)
+            c = network.add_elementwise(control.pop(), hs.pop(), trt.ElementWiseOperation.SUM)
             h = network.add_concatenation([h.get_output(0), c.get_output(0)])
             print('output: ', index, h.get_output(0).shape)
             pre = 'model.diffusion_model.output_blocks.{}'.format(index)
@@ -569,8 +569,149 @@ def unet(network, weight_map, embed_weight, h, emb, context, control):
 
     return h
 
-def create_df_engine(weight_map, embed_weight):
-    # logger = trt.Logger(trt.Logger.VERBOSE)
+# def create_df_engine(weight_map, embed_weight):
+#     # logger = trt.Logger(trt.Logger.VERBOSE)
+#     logger = trt.Logger(trt.Logger.INFO)
+#     builder = trt.Builder(logger)
+#     config = builder.create_builder_config()
+
+#     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+#     h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
+#     hint = network.add_input("hint", trt.float32, trt.Dims([1, 320, 32, 48]))
+#     t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
+#     context = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
+
+#     context = {'context': context, 'start': 0}
+#     control = control_net(network, weight_map, embed_weight, h, hint, t_emb, context)
+#     x = unet(network, weight_map, embed_weight, h, t_emb, context, control)
+
+#     print(x.get_output(0).shape)
+
+#     x.get_output(0).name = 'out'
+#     network.mark_output(x.get_output(0))
+
+#     # for i in range(network.num_layers):
+#     #     layer = network.get_layer(i)
+#     #     if layer.type != trt.LayerType.CONVOLUTION:
+#     #         network.get_layer(i).precision = trt.DataType.FLOAT
+    
+#     # builder.max_batch_size = 1
+#     config.max_workspace_size = 4<<30
+#     # config.set_flag(trt.BuilderFlag.FP16)
+#     # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+#     # config.max_aux_streams = 8
+#     config.set_flag(trt.BuilderFlag.DIRECT_IO)
+#     engine = builder.build_engine(network, config)
+
+#     del network
+
+#     return engine
+
+def create_unet_output_engine(weight_map, embed_weight, context):
+    logger = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(logger)
+    config = builder.create_builder_config()
+
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
+    c = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
+
+    control = []
+    control.append(network.add_input("c1", trt.float32, trt.Dims([2, 320, 32, 48])))
+    control.append(network.add_input("c2", trt.float32, trt.Dims([2, 320, 32, 48])))
+    control.append(network.add_input("c3", trt.float32, trt.Dims([2, 320, 32, 48])))
+    control.append(network.add_input("c4", trt.float32, trt.Dims([2, 320, 16, 24])))
+    control.append(network.add_input("c5", trt.float32, trt.Dims([2, 640, 16, 24])))
+    control.append(network.add_input("c6", trt.float32, trt.Dims([2, 640, 16, 24])))
+    control.append(network.add_input("c7", trt.float32, trt.Dims([2, 640, 8, 12])))
+    control.append(network.add_input("c8", trt.float32, trt.Dims([2, 1280, 8, 12])))
+    control.append(network.add_input("c9", trt.float32, trt.Dims([2, 1280, 8, 12])))
+    control.append(network.add_input("c10", trt.float32, trt.Dims([2, 1280, 4, 6])))
+    control.append(network.add_input("c11", trt.float32, trt.Dims([2, 1280, 4, 6])))
+    control.append(network.add_input("c12", trt.float32, trt.Dims([2, 1280, 4, 6])))
+    control.append(network.add_input("c13", trt.float32, trt.Dims([2, 1280, 4, 6])))
+
+    hs = []
+    hs.append(network.add_input("h1", trt.float32, trt.Dims([2, 320, 32, 48])))
+    hs.append(network.add_input("h2", trt.float32, trt.Dims([2, 320, 32, 48])))
+    hs.append(network.add_input("h3", trt.float32, trt.Dims([2, 320, 32, 48])))
+    hs.append(network.add_input("h4", trt.float32, trt.Dims([2, 320, 16, 24])))
+    hs.append(network.add_input("h5", trt.float32, trt.Dims([2, 640, 16, 24])))
+    hs.append(network.add_input("h6", trt.float32, trt.Dims([2, 640, 16, 24])))
+    hs.append(network.add_input("h7", trt.float32, trt.Dims([2, 640, 8, 12])))
+    hs.append(network.add_input("h8", trt.float32, trt.Dims([2, 1280, 8, 12])))
+    hs.append(network.add_input("h9", trt.float32, trt.Dims([2, 1280, 8, 12])))
+    hs.append(network.add_input("h10", trt.float32, trt.Dims([2, 1280, 4, 6])))
+    hs.append(network.add_input("h11", trt.float32, trt.Dims([2, 1280, 4, 6])))    
+    hs.append(network.add_input("h12", trt.float32, trt.Dims([2, 1280, 4, 6]))) 
+    hs.append(network.add_input("h13", trt.float32, trt.Dims([2, 1280, 4, 6])))
+
+    context['context'] = c
+
+    h = network.add_elementwise(hs.pop(), control.pop(), trt.ElementWiseOperation.SUM)
+    #####################
+    # output_blocks
+    #####################
+    x = output_blocks(network, weight_map, embed_weight, h, t_emb, context, control, hs)
+
+    # out
+    # group_norm
+    x = group_norm(network, weight_map, x, 'model.diffusion_model.out.0')
+    # silu
+    x = silu(network, x)
+    # conv_nd
+    x = conv(network, weight_map, x, 4, 'model.diffusion_model.out.2', 3, 1, 1)
+
+    x.get_output(0).name = 'out'
+    network.mark_output(x.get_output(0))
+
+    # builder.max_batch_size = 1
+    config.max_workspace_size = 1<<30
+    config.set_flag(trt.BuilderFlag.FP16)
+    engine = builder.build_engine(network, config)
+
+    del network
+
+    return engine
+
+def create_unet_input_engine(weight_map, embed_weight, context):
+    logger = trt.Logger(trt.Logger.INFO)
+    builder = trt.Builder(logger)
+    config = builder.create_builder_config()
+
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
+    t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
+    c = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
+
+    context['context'] = c
+    #####################
+    # input_blocks
+    #####################
+    hs, h = input_block(network, weight_map, embed_weight, h, t_emb, context, 'model.diffusion_model')
+    print(h.get_output(0).shape)
+
+    #####################
+    # middle_blocks
+    #####################   
+    h = middle_block(network, weight_map, embed_weight, h, t_emb, context, 'model.diffusion_model')
+    print(h.get_output(0).shape)
+    hs.append(h)
+
+    for i in range(len(hs)):
+        hs[i].get_output(0).name = 'h{}'.format(i + 1)
+        network.mark_output(hs[i].get_output(0))
+    
+    # builder.max_batch_size = 1
+    config.max_workspace_size = 1<<30
+    config.set_flag(trt.BuilderFlag.FP16)
+    engine = builder.build_engine(network, config)
+
+    del network
+
+    return engine
+
+def create_control_engine(weight_map, embed_weight, context):
     logger = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
@@ -579,42 +720,43 @@ def create_df_engine(weight_map, embed_weight):
     h = network.add_input("x", trt.float32, trt.Dims([1, 4, 32, 48]))
     hint = network.add_input("hint", trt.float32, trt.Dims([1, 320, 32, 48]))
     t_emb = network.add_input("t_emb", trt.int32, trt.Dims([1]))
-    context = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
+    c = network.add_input("context", trt.float32, trt.Dims([16, 77, 4560]))
 
-    context = {'context': context, 'start': 0}
+    context['context'] = c
     control = control_net(network, weight_map, embed_weight, h, hint, t_emb, context)
-    x = unet(network, weight_map, embed_weight, h, t_emb, context, control)
 
-    print(x.get_output(0).shape)
-
-    x.get_output(0).name = 'out'
-    network.mark_output(x.get_output(0))
-
-    # for i in range(network.num_layers):
-    #     layer = network.get_layer(i)
-    #     if layer.type != trt.LayerType.CONVOLUTION:
-    #         network.get_layer(i).precision = trt.DataType.FLOAT
+    for i in range(len(control)):
+        control[i].get_output(0).name = 'c{}'.format(i + 1)
+        network.mark_output(control[i].get_output(0))
     
     # builder.max_batch_size = 1
-    config.max_workspace_size = 2<<30
-    # config.max_aux_streams = 8
+    config.max_workspace_size = 1<<30
     config.set_flag(trt.BuilderFlag.FP16)
-    config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-    config.set_flag(trt.BuilderFlag.DIRECT_IO)
     engine = builder.build_engine(network, config)
 
     del network
 
     return engine
 
-
 def convert_trt_engine(input_model_path):
     weight_map = load_torch_model(input_model_path)
     embed_weight = compute_embedding()
-    df_engine = create_df_engine(weight_map, embed_weight)
-    df_data = bytes(df_engine.serialize())
-    with open('./df.plan', 'wb') as f:
-        f.write(df_data)
+    context = {'start' : 0}
+
+    engine = create_control_engine(weight_map, embed_weight, context)
+    engine_data = bytes(engine.serialize())
+    with open('./trt/control_fp16.plan', 'wb') as f:
+        f.write(engine_data)
+
+    engine = create_unet_input_engine(weight_map, embed_weight, context)
+    engine_data = bytes(engine.serialize())
+    with open('./trt/unet_input_fp16.plan', 'wb') as f:
+        f.write(engine_data)
+
+    engine = create_unet_output_engine(weight_map, embed_weight, context)
+    engine_data = bytes(engine.serialize())
+    with open('./trt/unet_output_fp16.plan', 'wb') as f:
+        f.write(engine_data)
 
     del weight_map
 

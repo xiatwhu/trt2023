@@ -22,6 +22,11 @@ class DDIMTrt(object):
         self.ddim_sigmas = 0 * self.ddim_alphas_prev
         self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
 
+        # print("ddim_alphas", self.ddim_alphas)
+        # print("ddim_alphas_prev", self.ddim_alphas_prev)
+        # print("ddim_sqrt_one_minus_alphas", self.ddim_sqrt_one_minus_alphas)
+        # exit(0)
+
         device = torch.device('cuda')
         tensors_shape_map = {
                 "x": (1, 4, 32, 48),
@@ -113,7 +118,7 @@ class DDIMTrt(object):
                 self.tensors['t_emb'].copy_(t_emb)
                 torch.cuda.synchronize()
 
-                if index < 12:
+                if index < 20:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream0)
                     cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream1)
                     cudart.cudaStreamSynchronize(self.stream0)
@@ -132,6 +137,14 @@ class DDIMTrt(object):
 
                 e_t = model_output
 
+                # a_t = torch.full((1, 1, 1, 1), self.ddim_alphas[index], device=device)
+                # a_prev = torch.full((1, 1, 1, 1), self.ddim_alphas_prev[index], device=device)
+                # sigma_t = torch.full((1, 1, 1, 1), 0.0, device=device)
+                # sqrt_one_minus_at = torch.full((1, 1, 1, 1), self.ddim_sqrt_one_minus_alphas[index],device=device)
+
+                # pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
+                # dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+                # x = a_prev.sqrt() * pred_x0 + dir_xt
                 pred_x0 = (x - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
                 dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
                 x = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt

@@ -27,6 +27,7 @@ class hackathon():
         self.model = create_model('./models/cldm_v15.yaml').cpu()
         self.model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
         self.model = self.model.cuda()
+
         del self.model.cond_stage_model
         del self.model.control_model
         # del self.model.decode_first_stage

@@ -53,6 +53,11 @@ class DDIMSampler(object):
             (1 - self.alphas_cumprod_prev) / (1 - self.alphas_cumprod) * (
                         1 - self.alphas_cumprod / self.alphas_cumprod_prev))
         self.register_buffer('ddim_sigmas_for_original_num_steps', sigmas_for_original_sampling_steps)
+        print('ddim_sigmas', self.ddim_sigmas)
+        print('ddim_alphas', self.ddim_alphas)
+        print('ddim_alphas_prev', self.ddim_alphas_prev)
+        print('ddim_sqrt_one_minus_alphas', self.ddim_sqrt_one_minus_alphas)
+        print('ddim_sigmas_for_original_num_steps', self.ddim_sigmas_for_original_num_steps)
 
     @torch.no_grad()
     def sample(self,

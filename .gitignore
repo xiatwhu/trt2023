@@ -142,3 +142,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+*.plan
+*.engine
+*.nsys-rep
+*.sqlite
+*.qdstrm
+*.onnx

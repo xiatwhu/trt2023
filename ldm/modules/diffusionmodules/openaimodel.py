@@ -260,7 +260,8 @@ class ResBlock(TimestepBlock):
             h = in_conv(h)
         else:
             h = self.in_layers(x)
-        emb_out = self.emb_layers(emb).type(h.dtype)
+        # emb_out = self.emb_layers(emb).type(h.dtype)
+        emb_out = F.embedding(emb, self.emb_layers.table).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
             emb_out = emb_out[..., None]
         if self.use_scale_shift_norm:

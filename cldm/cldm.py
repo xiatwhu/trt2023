@@ -21,36 +21,36 @@ from ldm.models.diffusion.ddim import DDIMSampler
 
 in_unet = False
 
+from export_state import global_state
+
 class ControlledUnetModel(UNetModel):
 
-    def forward(self, x, timesteps=None, context=None, control=None, only_mid_control=False, **kwargs):
-        global in_unet
-        in_unet = True
-
-        hs = []
-        with torch.no_grad():
-            t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-
-            emb = self.time_embed(t_emb)
-
-            h = x.type(self.dtype)
-            for module in self.input_blocks:
-                h = module(h, emb, context)
+    def forward(self, x, timesteps=None, context=None, control=None, hs=None, only_mid_control=False, **kwargs):
+        emb = timesteps
+        if hs == None:
+            hs = []
+            with torch.no_grad():
+                h = x.type(self.dtype)
+                for module in self.input_blocks:
+                    h = module(h, emb, context)
+                    if h.shape[0] == 1:
+                        h = h.expand(2, -1, -1, -1)
+                    hs.append(h)
+                h = self.middle_block(h, emb, context)
                 hs.append(h)
-            h = self.middle_block(h, emb, context)
+            return hs
+        else:
+            if control is not None:
+                h = hs.pop() + control.pop()
 
-        if control is not None:
-            h += control.pop()
-
-        for i, module in enumerate(self.output_blocks):
-            if only_mid_control or control is None:
-                h = torch.cat([h, hs.pop()], dim=1)
-            else:
-                h = torch.cat([h, hs.pop() + control.pop()], dim=1)
-            h = module(h, emb, context)
-        h = h.type(x.dtype)
-        return self.out(h)
-
+            for i, module in enumerate(self.output_blocks):
+                if only_mid_control or control is None:
+                    h = torch.cat([h, hs.pop()], dim=1)
+                else:
+                    h = torch.cat([h, hs.pop() + control.pop()], dim=1)
+                h = module(h, emb, context)
+            h = h.type(x.dtype)
+            return self.out(h)
 
 class ControlNet(nn.Module):
     def __init__(
@@ -289,10 +289,12 @@ class ControlNet(nn.Module):
         return TimestepEmbedSequential(zero_module(conv_nd(self.dims, channels, channels, 1, padding=0)))
 
     def forward(self, x, hint, timesteps, context, **kwargs):
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb)
+        # t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        # emb = self.time_embed(t_emb)
 
-        guided_hint = self.input_hint_block(hint, emb, context)
+        # guided_hint = self.input_hint_block(hint, emb, context)
+        guided_hint = hint
+        emb = timesteps
 
         outs = []
 
@@ -304,6 +306,9 @@ class ControlNet(nn.Module):
                 guided_hint = None
             else:
                 h = module(h, emb, context)
+            if h.shape[0] == 1:
+                h = h.expand(2, -1, -1, -1)
+                # h = torch.tile(h, (2, 1, 1, 1))
             outs.append(zero_conv(h, emb, context))
 
         h = self.middle_block(h, emb, context)

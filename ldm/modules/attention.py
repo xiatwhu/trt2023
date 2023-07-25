@@ -18,7 +18,7 @@ except:
 
 # CrossAttn precision handling
 import os
-_ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp32")
+_ATTN_PRECISION = os.environ.get("ATTN_PRECISION", "fp16")
 
 def exists(val):
     return val is not None
@@ -164,11 +164,22 @@ class CrossAttention(nn.Module):
         h = self.heads
 
         q = self.to_q(x)
-        context = default(context, x)
-        k = self.to_k(context)
-        v = self.to_v(context)
+        if context == None:
+            context = default(context, x)
+            k = self.to_k(context)
+            v = self.to_v(context)
 
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
+
+        else:
+            from export_state import global_state
+            q = rearrange(q, 'b n (h d) -> (b h) n d', h=h)
+            d = q.shape[2]
+            k = context[:, :, global_state['start']: global_state['start'] + d]
+            v = context[:, :, global_state['start'] + d: global_state['start'] + 2 * d]
+            global_state['start'] += 2 * d
+
+        # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
         # force cast to fp32 to avoid overflowing
         if _ATTN_PRECISION =="fp32":

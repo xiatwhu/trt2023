@@ -197,6 +197,7 @@ class DDIMSampler(object):
                 model_uncond = self.model.apply_model(x, t, unconditional_conditioning)
                 model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
+        import pdb; pdb.set_trace()
         if self.model.parameterization == "v":
             e_t = self.model.predict_eps_from_z_and_v(x, t, model_output)
         else:

@@ -1,12 +1,26 @@
 import tensorrt as trt
 from cuda import cudart
 import torch
+import numpy as np
+
+trt_logger = trt.Logger(trt.Logger.INFO)
+trt.init_libnvinfer_plugins(trt_logger, '')
 
 class DDIMTrt(object):
     def __init__(self, model):
         super().__init__()
 
         self.model = model
+        ddim_timesteps = np.asarray(list(range(0, 1000, 50))) + 1
+        alphacums = self.model.alphas_cumprod.cpu().numpy()
+
+        self.ddim_alphas = alphacums[ddim_timesteps]
+        self.ddim_alphas_sqrt = np.sqrt(self.ddim_alphas)
+        self.ddim_alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
+        self.ddim_alphas_prev_sqrt = np.sqrt(self.ddim_alphas_prev)
+        self.ddim_alphas_prev_sub_sqrt = np.sqrt(1. - self.ddim_alphas_prev)
+        self.ddim_sigmas = 0 * self.ddim_alphas_prev
+        self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
 
         device = torch.device('cuda')
         tensors_shape_map = {
@@ -55,17 +69,17 @@ class DDIMTrt(object):
         self.stream1 = cudart.cudaStreamCreateWithPriority(cudart.cudaStreamNonBlocking, 0)[1]
         self.engine_context_map = {}
 
-        self.control_graph_instance = self.load_engine('control', self.stream0)
-        self.unet_input_graph_instance = self.load_engine('unet_input', self.stream1)
-        self.unet_output_graph_instance = self.load_engine('unet_output', self.stream1)
+        self.control_graph_instance = self.load_engine('sd_control', self.stream0)
+        self.unet_input_graph_instance = self.load_engine('sd_unet_input', self.stream1)
+        self.unet_output_graph_instance = self.load_engine('sd_unet_output', self.stream1)
 
-        self.control_fp16_graph_instance = self.load_engine('control_fp16', self.stream0)
-        self.unet_input_fp16_graph_instance = self.load_engine('unet_input_fp16', self.stream1)
-        self.unet_output_fp16_graph_instance = self.load_engine('unet_output_fp16', self.stream1)
+        self.control_fp16_graph_instance = self.load_engine('sd_control_fp16', self.stream0)
+        self.unet_input_fp16_graph_instance = self.load_engine('sd_unet_input_fp16', self.stream1)
+        self.unet_output_fp16_graph_instance = self.load_engine('sd_unet_output_fp16', self.stream1)
         
 
     def load_engine(self, model, stream):
-        trt_logger = trt.Logger(trt.Logger.VERBOSE)
+        trt_logger = trt.Logger(trt.Logger.INFO)
 
         with open('trt/{}.plan'.format(model), 'rb') as f, trt.Runtime(trt_logger) as runtime:
             trt_engine = runtime.deserialize_cuda_engine(f.read())
@@ -74,12 +88,7 @@ class DDIMTrt(object):
             for index in range(trt_engine.num_io_tensors):
                 name = trt_engine.get_binding_name(index)
                 trt_ctx.set_tensor_address(name, self.tensors[name].data_ptr())
-            # print(trt_engine.num_bindings)
-            # print(trt_ctx.all_binding_shapes_specified)
-            # print(trt_ctx.all_shape_inputs_specified)
-            # print(trt_ctx.infer_shapes())
-            # # exit(0)
-            # print(cudart.cudaStreamSynchronize(stream))
+
             trt_ctx.execute_async_v3(stream)
             
             cudart.cudaStreamBeginCapture(stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
@@ -90,81 +99,41 @@ class DDIMTrt(object):
             self.engine_context_map[model] = trt_ctx
         return graph_instance
 
-    def run(self, x, c, index, unconditional_guidance_scale, unconditional_conditioning):
+    def run(self, x, context, hint, unconditional_guidance_scale):
         device = x.device
         with torch.no_grad():
+            for index in reversed(range(20)):
             
-            if index == 19:
-                control = torch.cat(c['c_concat'], 1)
-                hint = self.model.control_model.input_hint_block(control, None, None)
-                self.tensors['hint'].copy_(hint)
+                if index == 19:
+                    self.tensors['hint'].copy_(hint)
+                    self.tensors['context'].copy_(context)
 
-                context = torch.cat([torch.cat(c['c_crossattn'], 1), torch.cat(unconditional_conditioning['c_crossattn'], 1)], 0) 
-                context_bank = []
-                control_model = self.model.control_model
-                unet = self.model.model.diffusion_model
+                t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
+                self.tensors['x'].copy_(x)
+                self.tensors['t_emb'].copy_(t_emb)
+                torch.cuda.synchronize()
 
-                # control net
-                block = [1, 2, 4, 5, 7, 8]
-                for i in block:
-                    context_bank.append(control_model.input_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
-                    context_bank.append(control_model.input_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
-                
-                context_bank.append(control_model.middle_block[1].transformer_blocks[0].attn2.to_k(context))
-                context_bank.append(control_model.middle_block[1].transformer_blocks[0].attn2.to_v(context))
+                if index < 12:
+                    cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream0)
+                    cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream1)
+                    cudart.cudaStreamSynchronize(self.stream0)
+                    # cudart.cudaStreamSynchronize(self.stream1)
+                    cudart.cudaGraphLaunch(self.unet_output_fp16_graph_instance, self.stream1)
+                    cudart.cudaStreamSynchronize(self.stream1)
+                else:
+                    cudart.cudaGraphLaunch(self.control_graph_instance, self.stream0)
+                    cudart.cudaGraphLaunch(self.unet_input_graph_instance, self.stream1)
+                    cudart.cudaStreamSynchronize(self.stream0)
+                    # cudart.cudaStreamSynchronize(self.stream1)
+                    cudart.cudaGraphLaunch(self.unet_output_graph_instance, self.stream1)
+                    cudart.cudaStreamSynchronize(self.stream1)
+                model_t, model_uncond = self.tensors['out'].chunk(2)
+                model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
 
-                # unet
-                block = [1, 2, 4, 5, 7, 8]
-                for i in block:
-                    context_bank.append(unet.input_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
-                    context_bank.append(unet.input_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
+                e_t = model_output
 
-                context_bank.append(unet.middle_block[1].transformer_blocks[0].attn2.to_k(context))
-                context_bank.append(unet.middle_block[1].transformer_blocks[0].attn2.to_v(context))
+                pred_x0 = (x - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
+                dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
+                x = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt
 
-                block = [3, 4, 5, 6, 7, 8, 9, 10, 11]
-                for i in block:
-                    context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
-                    context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
-                
-                for i in range(len(context_bank)):
-                    context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
-                context_bank = torch.cat(context_bank, -1)
-
-                self.tensors['context'].copy_(context_bank)
-
-            # t_emb = timestep_embedding(t, 320, repeat_only=False)
-            t_emb = torch.full((1,), index, device=device, dtype=torch.int32)
-            self.tensors['x'].copy_(x)
-            self.tensors['t_emb'].copy_(t_emb)
-            torch.cuda.synchronize()
-
-            if index < 12:
-                # self.engine_context_map['unet_input_fp16'].execute_async_v3(self.stream1)
-                # self.engine_context_map['control_fp16'].execute_async_v3(self.stream0)
-                # cudart.cudaStreamSynchronize(self.stream0)
-                # cudart.cudaStreamSynchronize(self.stream1)
-                # self.engine_context_map['unet_output_fp16'].execute_async_v3(self.stream1)
-                # cudart.cudaStreamSynchronize(self.stream1)
-                cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream0)
-                cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream1)
-                cudart.cudaStreamSynchronize(self.stream0)
-                cudart.cudaStreamSynchronize(self.stream1)
-                cudart.cudaGraphLaunch(self.unet_output_fp16_graph_instance, self.stream1)
-                cudart.cudaStreamSynchronize(self.stream1)
-            else:
-                self.engine_context_map['unet_input'].execute_async_v3(self.stream1)
-                self.engine_context_map['control'].execute_async_v3(self.stream0)
-                cudart.cudaStreamSynchronize(self.stream0)
-                cudart.cudaStreamSynchronize(self.stream1)
-                self.engine_context_map['unet_output'].execute_async_v3(self.stream1)
-                cudart.cudaStreamSynchronize(self.stream1)
-                # cudart.cudaGraphLaunch(self.control_graph_instance, self.stream0)
-                # cudart.cudaGraphLaunch(self.unet_input_graph_instance, self.stream1)
-                # cudart.cudaStreamSynchronize(self.stream0)
-                # cudart.cudaStreamSynchronize(self.stream1)
-                # cudart.cudaGraphLaunch(self.unet_output_graph_instance, self.stream1)
-                # cudart.cudaStreamSynchronize(self.stream1)
-            model_t, model_uncond = self.tensors['out'].chunk(2)
-            model_output = model_uncond + unconditional_guidance_scale * (model_t - model_uncond)
-            return model_output
+        return x

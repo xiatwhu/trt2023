@@ -7,6 +7,14 @@ import torch
 
 from ldm.modules.diffusionmodules.util import timestep_embedding
 
+TRT_LOGGER = trt.Logger(trt.Logger.VERBOSE)
+trt.init_libnvinfer_plugins(TRT_LOGGER, '')
+PLUGIN_CREATORS = trt.get_plugin_registry().plugin_creator_list
+
+for i in PLUGIN_CREATORS:
+    print(i.name)
+exit(0)
+
 EPS = 1e-5
 
 def compute_embedding():
@@ -190,7 +198,21 @@ def resblock(network, weight_map, embed_weight, i, ch, h, emb):
 def self_attention(network, weight_map, i, ch, x):
     h = x.get_output(0).shape[2]
     w = x.get_output(0).shape[3]
+
+    qkv_kernel = np.concatenate((weight_map['{}.transformer_blocks.0.attn1.to_q.weight'.format(i)],
+                                 weight_map['{}.transformer_blocks.0.attn1.to_k.weight'.format(i)],
+                                 weight_map['{}.transformer_blocks.0.attn1.to_v.weight'.format(i)]), axis=0).contiguous()
+    qkv = network.add_convolution(
+            input=x.get_output(0),
+            num_output_maps=ch * 3,
+            kernel_shape=(1, 1),
+            kernel=qkv_kernel)
+    qkv.padding = (0, 0)
+    qkv.stride = (1, 1)
+
     
+
+    """    
     heads = 8
     dim_head = ch / heads
     scale = dim_head ** -0.5
@@ -248,6 +270,7 @@ def self_attention(network, weight_map, i, ch, x):
     out = network.add_shuffle(out.get_output(0))
     out.first_transpose = trt.Permutation([0, 2, 1])
     out.reshape_dims = (2, ch, h, w)
+    """
 
     # to_out
     out = conv(network, weight_map, out, ch, '{}.transformer_blocks.0.attn1.to_out.0'.format(i), 1, 0, 1)
@@ -748,15 +771,15 @@ def convert_trt_engine(input_model_path):
     with open('./trt/control_fp16.plan', 'wb') as f:
         f.write(engine_data)
 
-    engine = create_unet_input_engine(weight_map, embed_weight, context)
-    engine_data = bytes(engine.serialize())
-    with open('./trt/unet_input_fp16.plan', 'wb') as f:
-        f.write(engine_data)
+    # engine = create_unet_input_engine(weight_map, embed_weight, context)
+    # engine_data = bytes(engine.serialize())
+    # with open('./trt/unet_input_fp16.plan', 'wb') as f:
+    #     f.write(engine_data)
 
-    engine = create_unet_output_engine(weight_map, embed_weight, context)
-    engine_data = bytes(engine.serialize())
-    with open('./trt/unet_output_fp16.plan', 'wb') as f:
-        f.write(engine_data)
+    # engine = create_unet_output_engine(weight_map, embed_weight, context)
+    # engine_data = bytes(engine.serialize())
+    # with open('./trt/unet_output_fp16.plan', 'wb') as f:
+    #     f.write(engine_data)
 
     del weight_map
 

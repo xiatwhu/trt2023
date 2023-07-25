@@ -13,6 +13,9 @@ from annotator.util import resize_image, HWC3
 from annotator.canny import CannyDetector
 from cldm.model import create_model, load_state_dict
 from cldm.ddim_hacked import DDIMSampler
+from trt.clip_trt import CLIPTrt
+from trt.vae_trt import VAETrt
+from trt.ddim_trt import DDIMTrt
 
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
@@ -24,8 +27,17 @@ class hackathon():
         self.model = create_model('./models/cldm_v15.yaml').cpu()
         self.model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
         self.model = self.model.cuda()
-        self.ddim_sampler = DDIMSampler(self.model)
-        self.ddim_sampler.init_trt()
+        del self.model.cond_stage_model
+        del self.model.control_model
+        # del self.model.decode_first_stage
+        torch.cuda.empty_cache()
+
+        # self.ddim_sampler = DDIMSampler(self.model)
+        # self.ddim_sampler.make_schedule(20)
+        # self.ddim_sampler.init_trt()
+        self.clip = CLIPTrt()
+        self.vae = VAETrt()
+        self.ddim = DDIMTrt(self.model)
 
 
     def process(self, input_image, prompt, a_prompt, n_prompt, num_samples, image_resolution, ddim_steps, guess_mode, strength, scale, seed, eta, low_threshold, high_threshold):
@@ -37,34 +49,22 @@ class hackathon():
             detected_map = HWC3(detected_map)
 
             control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
-            control = torch.stack([control for _ in range(num_samples)], dim=0)
-            control = einops.rearrange(control, 'b h w c -> b c h w').clone()
+            control = torch.unsqueeze(control, 0)
+            # control = torch.stack([control for _ in range(num_samples)], dim=0)
 
             if seed == -1:
                 seed = random.randint(0, 65535)
             seed_everything(seed)
 
-            if config.save_memory:
-                self.model.low_vram_shift(is_diffusing=False)
+            img = torch.randn((1, 4, 32, 48), device=control.device)
 
-            cond = {"c_concat": [control], "c_crossattn": [self.model.get_learned_conditioning([prompt + ', ' + a_prompt] * num_samples)]}
-            un_cond = {"c_concat": None if guess_mode else [control], "c_crossattn": [self.model.get_learned_conditioning([n_prompt] * num_samples)]}
-            shape = (4, H // 8, W // 8)
+            context, hint = self.clip.run(prompt, a_prompt, n_prompt, control)
+            # print(clip_out)
 
-            if config.save_memory:
-                self.model.low_vram_shift(is_diffusing=True)
+            samples = self.ddim.run(img, context, hint, scale)
 
-            self.model.control_scales = [strength * (0.825 ** float(12 - i)) for i in range(13)] if guess_mode else ([strength] * 13)  # Magic number. IDK why. Perhaps because 0.825**12<0.01 but 0.826**12>0.01
-            samples, intermediates = self.ddim_sampler.sample(ddim_steps, num_samples,
-                                                        shape, cond, verbose=False, eta=eta,
-                                                        unconditional_guidance_scale=scale,
-                                                        unconditional_conditioning=un_cond)
-
-            if config.save_memory:
-                self.model.low_vram_shift(is_diffusing=False)
-
-            x_samples = self.model.decode_first_stage(samples)
-            x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-
+            # x_samples = self.model.decode_first_stage(samples)
+            # x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
+            x_samples = self.vae.run(samples).cpu().numpy()
             results = [x_samples[i] for i in range(num_samples)]
         return results

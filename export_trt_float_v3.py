@@ -8,7 +8,7 @@ import torch
 from ldm.modules.diffusionmodules.util import timestep_embedding
 from cldm.model import create_model, load_state_dict
 
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel
 
 model = create_model('./models/cldm_v15.yaml').cpu()
 model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
@@ -71,7 +71,7 @@ def create_unet_output_engine():
     device = torch.device("cuda")
     x = torch.zeros(1, 4, 32, 48, dtype=torch.float32).to(device)
     t_emb = torch.zeros(1, dtype=torch.int64).to(device)
-    context = torch.zeros(16, 77, 4560, dtype=torch.float32).to(device)
+    context = torch.zeros(2, 77, 8 * 4560, dtype=torch.float32).to(device)
 
     control = []
     control.append(torch.zeros(2, 320, 32, 48, dtype=torch.float32).to(device))
@@ -122,16 +122,19 @@ def create_unet_output_engine():
     
     from export_state import global_state
     print(global_state['start'])
+
+    # convert_onnx_to_trt('trt/sd_unet_output.onnx', 2<<30, 'trt/sd_unet_output_fp16.plan')
     # exit(0)
-    os.system("trtexec --onnx=trt/sd_unet_output.onnx --saveEngine=trt/sd_unet_output.plan")
+    # os.system("trtexec --onnx=trt/sd_unet_output.onnx --saveEngine=trt/sd_unet_output.plan")
     os.system("trtexec --onnx=trt/sd_unet_output.onnx --saveEngine=trt/sd_unet_output_fp16.plan --fp16")
+    
 
 def create_unet_input_engine():
     unet = model.model.diffusion_model
     device = torch.device("cuda")
     x = torch.zeros(1, 4, 32, 48, dtype=torch.float32).to(device)
     t_emb = torch.zeros(1, dtype=torch.int64).to(device)
-    context = torch.zeros(16, 77, 4560, dtype=torch.float32).to(device)
+    context = torch.zeros(2, 77, 8 * 4560, dtype=torch.float32).to(device)
 
     output_names = ['h{}'.format(i + 1) for i in range(13)]
 
@@ -147,9 +150,10 @@ def create_unet_input_engine():
     
     from export_state import global_state
     print(global_state['start'])
+    convert_onnx_to_trt('trt/sd_unet_input.onnx', 2<<30, 'trt/sd_unet_input_fp16.plan')
     # exit(0)
-    os.system("trtexec --onnx=trt/sd_unet_input.onnx --saveEngine=trt/sd_unet_input.plan")
-    os.system("trtexec --onnx=trt/sd_unet_input.onnx --saveEngine=trt/sd_unet_input_fp16.plan --fp16")
+    # os.system("trtexec --onnx=trt/sd_unet_input.onnx --saveEngine=trt/sd_unet_input.plan")
+    # os.system("trtexec --onnx=trt/sd_unet_input.onnx --saveEngine=trt/sd_unet_input_fp16.plan --fp16")
 
 def create_control_engine():
     control_model = model.control_model
@@ -157,7 +161,7 @@ def create_control_engine():
     x = torch.zeros(1, 4, 32, 48, dtype=torch.float32).to(device)
     hint = torch.zeros(1, 320, 32, 48, dtype=torch.float32).to(device)
     t_emb = torch.zeros(1, dtype=torch.int64).to(device)
-    context = torch.zeros(16, 77, 4560, dtype=torch.float32).to(device)
+    context = torch.zeros(2, 77, 8 * 4560, dtype=torch.float32).to(device)
 
     output_names = ['c{}'.format(i + 1) for i in range(13)]
 
@@ -173,9 +177,11 @@ def create_control_engine():
     
     from export_state import global_state
     print(global_state['start'])
+
+    convert_onnx_to_trt('trt/sd_control.onnx', 2<<30, 'trt/sd_control_fp16.plan')
     # exit(0)
-    os.system("trtexec --onnx=trt/sd_control.onnx --saveEngine=trt/sd_control.plan")
-    os.system("trtexec --onnx=trt/sd_control.onnx --saveEngine=trt/sd_control_fp16.plan --fp16")
+    # os.system("trtexec --onnx=trt/sd_control.onnx --saveEngine=trt/sd_control.plan")
+    # os.system("trtexec --onnx=trt/sd_control.onnx --saveEngine=trt/sd_control_fp16.plan --fp16")
 
 class CLIP(torch.nn.Module):
     def __init__(self, control_model, unet):
@@ -223,8 +229,8 @@ class CLIP(torch.nn.Module):
             context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_k(context))
             context_bank.append(unet.output_blocks[i][1].transformer_blocks[0].attn2.to_v(context))
         
-        for i in range(len(context_bank)):
-            context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
+        # for i in range(len(context_bank)):
+        #     context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
         context_bank = torch.cat(context_bank, -1)
 
         return context_bank, hint
@@ -246,7 +252,7 @@ def create_clip_engine():
                       output_names=['context', 'hint'])
     
     os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip.plan --workspace=1000")
-    os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip_fp16.plan --workspace=1000 --fp16")
+    # os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip_fp16.plan --workspace=1000 --fp16")
 
 class VAE(torch.nn.Module):
     def __init__(self, vae):
@@ -275,8 +281,25 @@ def create_vae_engine():
                       input_names=['z'],
                       output_names=['out'])
     
-    os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae.plan --workspace=2000")
+    # convert_onnx_to_trt('trt/sd_vae.onnx', 2<<30, 'trt/sd_vae_fp16.plan')
+    # os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae.plan --workspace=2000")
     os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae_fp16.plan --workspace=2000 --fp16")
+
+def convert_onnx_to_trt(onnx, workspace, filename):
+    builder = trt.Builder(trt_logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, trt_logger)
+    parser.flags = 1 << (int)(trt.OnnxParserFlag.NATIVE_INSTANCENORM)
+
+    success = parser.parse_from_file(onnx)
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace)
+    if 'fp16' in filename:
+        config.set_flag(trt.BuilderFlag.FP16)
+
+    serialized_engine = builder.build_serialized_network(network, config)
+    with open(filename, 'wb') as f:
+        f.write(serialized_engine)
 
 def convert_trt_engine():
     # vae
@@ -285,7 +308,6 @@ def convert_trt_engine():
     # clip
     create_clip_engine()
     
-    # weight_map = load_torch_model(input_model_path)
     compute_embedding()
     from export_state import global_state
 

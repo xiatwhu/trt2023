@@ -32,7 +32,7 @@ class DDIMTrt(object):
                 "x": (1, 4, 32, 48),
                 "hint": (1, 320, 32, 48),
                 "t_emb": (1, ),
-                "context": (16, 77, 4560),
+                "context": (2, 77, 8 * 4560),
                 "out": (2, 4, 32, 48),
                 "c1": (2, 320, 32, 48),
                 "c2": (2, 320, 32, 48),
@@ -137,14 +137,6 @@ class DDIMTrt(object):
 
                 e_t = model_output
 
-                # a_t = torch.full((1, 1, 1, 1), self.ddim_alphas[index], device=device)
-                # a_prev = torch.full((1, 1, 1, 1), self.ddim_alphas_prev[index], device=device)
-                # sigma_t = torch.full((1, 1, 1, 1), 0.0, device=device)
-                # sqrt_one_minus_at = torch.full((1, 1, 1, 1), self.ddim_sqrt_one_minus_alphas[index],device=device)
-
-                # pred_x0 = (x - sqrt_one_minus_at * e_t) / a_t.sqrt()
-                # dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
-                # x = a_prev.sqrt() * pred_x0 + dir_xt
                 pred_x0 = (x - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
                 dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
                 x = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt

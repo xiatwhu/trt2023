@@ -16,7 +16,7 @@ class CLIPTrt(object):
         self.tensors = {
             'input_ids': torch.ones(size=(2, 77), dtype=torch.int32, device=self.device),
             'control': torch.ones(size=(1, 256, 384, 3), dtype=torch.float32, device=self.device),
-            'context': torch.ones(size=(16, 77, 4560), dtype=torch.float32, device=self.device),
+            'context': torch.ones(size=(2, 77, 8 * 4560), dtype=torch.float32, device=self.device),
             'hint': torch.ones(size=(1, 320, 32, 48), dtype=torch.float32, device=self.device)
         }
 

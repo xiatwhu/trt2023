@@ -173,10 +173,10 @@ class CrossAttention(nn.Module):
 
         else:
             from export_state import global_state
-            q = rearrange(q, 'b n (h d) -> (b h) n d', h=h)
-            d = q.shape[2]
-            k = context[:, :, global_state['start']: global_state['start'] + d]
-            v = context[:, :, global_state['start'] + d: global_state['start'] + 2 * d]
+            d = q.shape[2] // h
+            k = context[:, :, h * global_state['start'] : h * (global_state['start'] + d)]
+            v = context[:, :, h * (global_state['start'] + d): h * (global_state['start'] + 2 * d)]
+            q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
             global_state['start'] += 2 * d
 
         # q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
@@ -190,6 +190,9 @@ class CrossAttention(nn.Module):
             sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
         
         del q, k
+
+        # if context != None:
+        #     global_state['start'] += 2 * d
     
         if exists(mask):
             mask = rearrange(mask, 'b ... -> b (...)')

@@ -155,6 +155,7 @@ class hackathon():
 
             cudart.cudaGraphLaunch(self.clip_instance, self.stream)
 
+
             for index in reversed(range(20)):
                 t_emb = torch.full((1, ), index, device=self.device, dtype=torch.int32)
                 self.tensors['t_emb'].copy_(t_emb)
@@ -162,12 +163,13 @@ class hackathon():
                 cudart.cudaEventRecord(self.event, self.stream)
                 
                 cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
-                if index > 15 or index % 3 == 0:
+                # if index == 19 or index % 3 == 0:
                 # if index > 10:
+                if index == 19 or index % 3 == 0:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                 cudart.cudaEventRecord(self.event1, self.stream1)
 
-                if index > 12 or index % 2 == 0:
+                if index > 17 or index % 4 == 0:
                 # if index > 4:
                     cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
 
@@ -189,8 +191,6 @@ class hackathon():
             cudart.cudaStreamSynchronize(self.stream)
             cudart.cudaStreamSynchronize(self.stream1)
             x_samples = self.tensors['img_out'].cpu().numpy()
-
-
 
             # context, hint = self.clip.run(prompt, a_prompt, n_prompt, control)
             # # print(clip_out)

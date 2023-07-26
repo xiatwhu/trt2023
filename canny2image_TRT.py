@@ -162,7 +162,8 @@ class hackathon():
                 cudart.cudaEventRecord(self.event, self.stream)
                 
                 cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
-                if index > 15 or index % 2 == 1:
+                if index > 15 or index % 3 == 0:
+                # if index > 10:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                 cudart.cudaEventRecord(self.event1, self.stream1)
 

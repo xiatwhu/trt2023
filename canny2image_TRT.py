@@ -99,7 +99,7 @@ class hackathon():
         self.vae_instance = self.load_engine('sd_vae_fp16', self.stream)
         self.control_fp16_graph_instance = self.load_engine('sd_control_fp16', self.stream1)
         self.unet_input_fp16_graph_instance = self.load_engine('sd_unet_input_fp16', self.stream)
-        self.unet_output_fp16_graph_instance = self.load_engine('sd_unet_output_fp16_in', self.stream)
+        self.unet_output_fp16_graph_instance = self.load_engine('sd_unet_output_fp16', self.stream)
 
         torch.cuda.set_stream(torch.cuda.ExternalStream(int(self.stream)))
 

@@ -162,10 +162,13 @@ class hackathon():
                 cudart.cudaEventRecord(self.event, self.stream)
                 
                 cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
-                cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
+                if index > 15 or index % 2 == 1:
+                    cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                 cudart.cudaEventRecord(self.event1, self.stream1)
 
-                cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
+                if index > 12 or index % 2 == 0:
+                # if index > 4:
+                    cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
 
                 cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
                 cudart.cudaGraphLaunch(self.unet_output_fp16_graph_instance, self.stream)

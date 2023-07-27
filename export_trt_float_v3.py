@@ -1,5 +1,7 @@
 import os
 import sys
+from copy import deepcopy
+from collections import OrderedDict
 
 import numpy as np
 import tensorrt as trt
@@ -18,6 +20,9 @@ control_model = model.control_model
 unet = model.model.diffusion_model
 
 trt_logger = trt.Logger(trt.Logger.WARNING)
+import ctypes
+ctypes.CDLL('./trt/libmyplugins.so.1', mode=ctypes.RTLD_GLOBAL)
+
 trt.init_libnvinfer_plugins(trt_logger, '')
 
 def compute_embedding():
@@ -195,16 +200,12 @@ class CLIP(torch.nn.Module):
         mask = mask.unsqueeze(1)
         self.register_buffer("causal_mask", mask)
 
-    def forward(self, input_ids, control):
+    def forward(self, input_ids):
         hidden_states = self.transformer.embeddings(input_ids=input_ids)
         encoder_outputs = self.transformer.encoder(
                 inputs_embeds=hidden_states,
                 causal_attention_mask=self.causal_mask)
         context = self.transformer.final_layer_norm(encoder_outputs[0])
-
-        # nhwc -> nchw
-        hint = control.permute(0, 3, 1, 2)
-        hint = control_model.input_hint_block(hint, None, None)
 
         context_bank = []
         block = [1, 2, 4, 5, 7, 8]
@@ -233,26 +234,53 @@ class CLIP(torch.nn.Module):
         #     context_bank[i] = context_bank[i].reshape(2, 77, 8, -1).permute(0, 2, 1, 3).reshape(16, 77, -1)
         context_bank = torch.cat(context_bank, -1)
 
-        return context_bank, hint
+        return context_bank
 
 def create_clip_engine():
     clip = CLIP(control_model, unet).cuda()
     device = torch.device("cuda")
     input_ids = torch.ones(2, 77, dtype=torch.int64).to(device)
-    control = torch.ones(1, 256, 384, 3, dtype=torch.float32).to(device)
 
     torch.onnx.export(clip,
-                      (input_ids, control),
+                      (input_ids),
                       'trt/sd_clip.onnx',
                       export_params=True,
                       opset_version=18,
                       do_constant_folding=True,
                       keep_initializers_as_inputs=True,
-                      input_names=['input_ids', 'control'],
-                      output_names=['context', 'hint'])
+                      input_names=['input_ids'],
+                      output_names=['context'])
     
-    os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip.plan --workspace=1000")
+    os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip.plan --workspace=1000 --noTF32")
     # os.system("trtexec --onnx=trt/sd_clip.onnx --saveEngine=trt/sd_clip_fp16.plan --workspace=1000 --fp16")
+
+class HINT(torch.nn.Module):
+    def __init__(self, control_model):
+        super().__init__()
+        self.control_model = control_model
+
+    def forward(self, control):
+        # nhwc -> nchw
+        hint = control.permute(0, 3, 1, 2)
+        hint = self.control_model.input_hint_block(hint, None, None)
+        return hint
+
+def create_hint_engine():
+    hint = HINT(control_model).cuda()
+    device = torch.device("cuda")
+    control = torch.ones(1, 256, 384, 3, dtype=torch.float32).to(device)
+
+    torch.onnx.export(hint,
+                      (control),
+                      'trt/sd_hint.onnx',
+                      export_params=True,
+                      opset_version=18,
+                      do_constant_folding=True,
+                      keep_initializers_as_inputs=True,
+                      input_names=['control'],
+                      output_names=['hint'])
+    
+    os.system("trtexec --onnx=trt/sd_hint.onnx --saveEngine=trt/sd_hint.plan --workspace=1000")
 
 class VAE(torch.nn.Module):
     def __init__(self, vae):
@@ -281,9 +309,126 @@ def create_vae_engine():
                       input_names=['z'],
                       output_names=['out'])
     
-    # convert_onnx_to_trt('trt/sd_vae.onnx', 2<<30, 'trt/sd_vae_fp16.plan')
+    convert_vae_to_trt('trt/sd_vae.onnx', 2<<30, 'trt/sd_vae_fp16.plan')
+    # convert_onnx_to_trt('trt/sd_vae.onnx', 2<<30, 'trt/sd_vae_fp16_native.plan')
     # os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae.plan --workspace=2000")
-    os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae_fp16.plan --workspace=2000 --fp16")
+    # os.system("trtexec --onnx=trt/sd_vae.onnx --saveEngine=trt/sd_vae_fp16.plan --workspace=2000 --fp16")
+
+def convert_vae_to_trt(onnx_file, workspace, filename):
+    import onnx_graphsurgeon as gs
+    import onnx
+    graph = gs.import_onnx(onnx.load(onnx_file))
+    node_names = {
+        '/decoder/block_1/norm1/Constant': True,
+        '/decoder/block_1/norm2/Constant': True,
+        '/decoder/attn_1/norm/Constant': False,
+        '/decoder/block_2/norm1/Constant': True,
+        '/decoder/block_2/norm2/Constant': True,
+        '/decoder/block.0/norm1/Constant': True,
+        '/decoder/block.0/norm2/Constant': True,
+        '/decoder/block.1/norm1/Constant': True,
+        '/decoder/block.1/norm2/Constant': True,
+        '/decoder/block.2/norm1/Constant': True,
+        '/decoder/block.2/norm2/Constant': True,
+        '/decoder/block.0/norm1_1/Constant': True,
+        '/decoder/block.0/norm2_1/Constant': True,
+        '/decoder/block.1/norm1_1/Constant': True,
+        '/decoder/block.1/norm2_1/Constant': True,
+        '/decoder/block.2/norm1_1/Constant': True,
+        '/decoder/block.2/norm2_1/Constant': True,
+        '/decoder/block.0/norm1_2/Constant': True,
+        '/decoder/block.0/norm2_2/Constant': True,
+        '/decoder/block.1/norm1_2/Constant': True,
+        '/decoder/block.1/norm2_2/Constant': True,
+        '/decoder/block.2/norm1_2/Constant': True,
+        '/decoder/block.2/norm2_2/Constant': True,
+        '/decoder/block.0/norm1_3/Constant': True,
+        '/decoder/block.0/norm2_3/Constant': True,
+        '/decoder/block.1/norm1_3/Constant': True,
+        '/decoder/block.1/norm2_3/Constant': True,
+        '/decoder/block.2/norm1_3/Constant': True,
+        '/decoder/block.2/norm2_3/Constant': True,
+        '/decoder/norm_out/Constant': True,
+    }
+
+    while True:
+        found = False
+        for node in graph.nodes:
+            if node.name in node_names:
+                assert node.op == 'Constant'
+                assert node.o().op == 'Reshape'
+                assert node.o().o().op == 'InstanceNormalization'
+                assert node.o().o().o().op == 'Reshape'
+                assert node.o().o().o().o().op == 'Mul'
+                assert node.o().o().o().o().o().op == 'Add'
+
+                if node_names[node.name]:
+                    assert node.o().o().o().o().o().o().op == 'Sigmoid'
+                    assert node.o().o().o().o().o().o().o().op == 'Mul'
+
+                scale = deepcopy(node.o().o().o().o().inputs[1].values)
+                bias = deepcopy(node.o().o().o().o().o().inputs[1].values)
+
+                # print(node.o().o().attrs['epsilon'])
+                epsilon = node.o().o().attrs['epsilon']
+                const_scale = gs.Constant('sdgnscale_{}'.format(node.name), np.ascontiguousarray(scale.reshape(-1)))
+                const_bias = gs.Constant('sdgnbias_{}'.format(node.name), np.ascontiguousarray(bias.reshape(-1)))
+                
+                inputTensor = node.o().inputs[0]
+                # print(inputTensor)
+                inputList = [inputTensor, const_scale, const_bias]
+                groupNormV = gs.Variable('sdgnout_{}'.format(node.name), np.dtype(np.float16), inputTensor.shape)
+                groupNormN = gs.Node('GroupNorm', 'sdgn-{}'.format(node.name),
+                                    inputs=inputList, outputs=[groupNormV],
+                                    attrs=OrderedDict([('epsilon', epsilon), ('bSwish', int(node_names[node.name]))]))
+                graph.nodes.append(groupNormN)
+
+                lastNode = node.o().o().o().o().o()
+                if node_names[node.name]:
+                    lastNode = node.o().o().o().o().o().o().o()
+                
+                for subNode in graph.nodes:
+                    if lastNode.outputs[0] in subNode.inputs:
+                    # subNode = lastNode.o()
+                        index = subNode.inputs.index(lastNode.outputs[0])
+                        subNode.inputs[index] = groupNormV
+                
+                node.o().inputs = []
+                lastNode.outputs = []
+
+                graph.cleanup().toposort()
+
+                found = True
+                break
+        
+        if not found:
+            break
+
+        # if node.op == 'Constant':
+        #     if node.o().op == 'Reshape' and 
+        # print(node.op, node.name, node.o().op, node.o().name)
+        # if node.op == 'Reshape':
+        #     print(node)
+    
+    for node in graph.nodes:
+        print(node.op, node.name)
+    
+    final_onnx = gs.export_onnx(graph)
+    onnx.save(final_onnx, 'trt/sd_vae_opt.onnx')
+
+    builder = trt.Builder(trt_logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+    parser = trt.OnnxParser(network, trt_logger)
+    # parser.flags = 1 << (int)(trt.OnnxParserFlag.NATIVE_INSTANCENORM)
+
+    success = parser.parse_from_file('trt/sd_vae_opt.onnx')
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace)
+    config.set_flag(trt.BuilderFlag.FP16)
+
+    serialized_engine = builder.build_serialized_network(network, config)
+    with open(filename, 'wb') as f:
+        f.write(serialized_engine)
 
 def convert_onnx_to_trt(onnx, workspace, filename):
     builder = trt.Builder(trt_logger)
@@ -302,11 +447,15 @@ def convert_onnx_to_trt(onnx, workspace, filename):
         f.write(serialized_engine)
 
 def convert_trt_engine():
-    # vae
+    # # vae
     create_vae_engine()
+    # exit(0)
 
     # clip
     create_clip_engine()
+
+    # # hint
+    # create_hint_engine()
     
     compute_embedding()
     from export_state import global_state

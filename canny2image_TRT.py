@@ -22,6 +22,12 @@ from trt.ddim_trt import DDIMTrt
 
 import tensorrt as trt
 
+trt_logger = trt.Logger(trt.Logger.WARNING)
+import ctypes
+ctypes.CDLL('./trt/libmyplugins.so.1', mode=ctypes.RTLD_GLOBAL)
+
+trt.init_libnvinfer_plugins(trt_logger, '')
+
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
 
@@ -29,11 +35,11 @@ class hackathon():
 
     def initialize(self):
         self.apply_canny = CannyDetector()
-        model = create_model('./models/cldm_v15.yaml').cpu()
-        model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
-        # self.model = self.model.cuda()
+        self.model = create_model('./models/cldm_v15.yaml').cpu()
+        self.model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
+        self.model = self.model.cuda()
         ddim_timesteps = np.asarray(list(range(0, 1000, 50))) + 1
-        alphacums = model.alphas_cumprod.cpu().numpy()
+        alphacums = self.model.alphas_cumprod.cpu().numpy()
         self.ddim_alphas = alphacums[ddim_timesteps]
         self.ddim_alphas_sqrt = np.sqrt(self.ddim_alphas)
         self.ddim_alphas_prev = np.asarray([alphacums[0]] + alphacums[ddim_timesteps[:-1]].tolist())
@@ -42,7 +48,7 @@ class hackathon():
         self.ddim_sigmas = 0 * self.ddim_alphas_prev
         self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
 
-        del model
+        # del model
 
         self.tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14')
         
@@ -95,8 +101,17 @@ class hackathon():
         self.event = cudart.cudaEventCreateWithFlags(cudart.cudaEventDisableTiming)[1]
         self.event1 = cudart.cudaEventCreateWithFlags(cudart.cudaEventDisableTiming)[1]
 
-        self.clip_instance = self.load_engine('sd_clip', self.stream)
+        self.clip_instance = self.load_engine('sd_clip', self.stream1)
+        # self.hint_instance = self.load_engine('sd_hint', self.stream)
+        # self.vae_instance = self.load_engine('sd_vae_fp16_native', self.stream)
         self.vae_instance = self.load_engine('sd_vae_fp16', self.stream)
+
+        # self.vae_instance = self.load_engine('sd_vae', self.stream)
+
+        # self.control_graph_instance = self.load_engine('sd_control', self.stream)
+        # self.unet_input_graph_instance = self.load_engine('sd_unet_input', self.stream)
+        # self.unet_output_graph_instance = self.load_engine('sd_unet_output', self.stream)
+
         self.control_fp16_graph_instance = self.load_engine('sd_control_fp16', self.stream1)
         self.unet_input_fp16_graph_instance = self.load_engine('sd_unet_input_fp16', self.stream)
         self.unet_output_fp16_graph_instance = self.load_engine('sd_unet_output_fp16', self.stream)
@@ -146,15 +161,22 @@ class hackathon():
 
             img = torch.randn((1, 4, 32, 48), device=control.device)
 
-            # vae
             text = [prompt + ', ' + a_prompt, n_prompt]
             batch_encoding = self.tokenizer(text, truncation=True, max_length=77, return_attention_mask=False, return_length=False,
                                             return_overflowing_tokens=False, padding="max_length", return_tensors="pt")
             self.tensors["input_ids"].copy_(batch_encoding["input_ids"])
-            self.tensors["control"].copy_(control)
+            cudart.cudaEventRecord(self.event, self.stream)
+            cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
+            cudart.cudaGraphLaunch(self.clip_instance, self.stream1)
+            cudart.cudaEventRecord(self.event1, self.stream1)
+            # cudart.cudaGraphLaunch(self.hint_instance, self.stream)
 
-            cudart.cudaGraphLaunch(self.clip_instance, self.stream)
-
+            import einops
+            control = einops.rearrange(control, 'b h w c -> b c h w').clone()
+            hint = self.model.control_model.input_hint_block(control, None, None)
+            self.tensors['hint'].copy_(hint)  
+            
+            cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
 
             for index in reversed(range(20)):
                 t_emb = torch.full((1, ), index, device=self.device, dtype=torch.int32)
@@ -163,13 +185,14 @@ class hackathon():
                 cudart.cudaEventRecord(self.event, self.stream)
                 
                 cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
+
                 # if index == 19 or index % 3 == 0:
                 # if index > 10:
-                if index == 19 or index % 3 == 0:
+                if index > 15 or index % 3 == 0:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                 cudart.cudaEventRecord(self.event1, self.stream1)
 
-                if index > 17 or index % 4 == 0:
+                if index > 12 or index % 2 == 0:
                 # if index > 4:
                     cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
 
@@ -192,13 +215,5 @@ class hackathon():
             cudart.cudaStreamSynchronize(self.stream1)
             x_samples = self.tensors['img_out'].cpu().numpy()
 
-            # context, hint = self.clip.run(prompt, a_prompt, n_prompt, control)
-            # # print(clip_out)
-
-            # samples = self.ddim.run(img, context, hint, scale)
-
-            # # x_samples = self.model.decode_first_stage(samples)
-            # # x_samples = (einops.rearrange(x_samples, 'b c h w -> b h w c') * 127.5 + 127.5).cpu().numpy().clip(0, 255).astype(np.uint8)
-            # x_samples = self.vae.run(samples).cpu().numpy()
             results = [x_samples[i] for i in range(num_samples)]
         return results

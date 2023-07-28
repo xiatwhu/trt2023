@@ -192,10 +192,19 @@ class hackathon():
 
                 ## 跑 11 个 step
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 6, 3, 0]: # 5.3313205394989325
-                if index in [19, 18, 17, 16, 15, 14, 13, 11, 8, 4, 0]: # 5.249650220918213
+                # if index in [19, 18, 17, 16, 15, 14, 13, 11, 8, 4, 0]: # 5.249650220918213
 
+                ## 跑 10 个 step
+                if index in [19, 18, 17, 16, 15, 14, 13, 10, 5, 0]: # 5.82819636733392
+                # if index in [19, 18, 17, 16, 15, 14, 13, 11, 7, 0]: # 5.82819636733392
                 
-                # if index in [19, 18, 17, 16, 15, 14, 13, 11, 8, 5, 3, 0]:
+                # if index in [19, 18, 17, 16, 15, 13, 11, 8, 4, 0]: # 5.484956360644748
+                # if index in [19, 18, 17, 16, 14, 12, 9, 6, 3, 0]:  # 5.532044607929889
+                # if index in [19, 18, 17, 16, 15, 12, 9, 6, 3, 0]:  # 5.696516972558076
+                # if index in [19, 18, 17, 15, 13, 11, 9, 6, 3, 0]: # 5.715132846621001
+                # if index in [19, 18, 17, 16, 15, 14, 12, 9, 5, 0]: # 5.82819636733392
+
+                    # if index not in [13]:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                     cudart.cudaEventRecord(self.event1, self.stream1)
                     cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)

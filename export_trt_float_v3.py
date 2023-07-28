@@ -457,17 +457,17 @@ def convert_trt_engine():
     # # hint
     # create_hint_engine()
     
-    compute_embedding()
-    from export_state import global_state
+    # compute_embedding()
+    # from export_state import global_state
 
-    # control
-    global_state['start'] = 0
-    create_control_engine()
+    # # control
+    # global_state['start'] = 0
+    # create_control_engine()
 
-    global_state['start'] = 1440
-    create_unet_input_engine()
+    # global_state['start'] = 1440
+    # create_unet_input_engine()
 
-    global_state['start'] = 2880
-    create_unet_output_engine()
+    # global_state['start'] = 2880
+    # create_unet_output_engine()
 
 convert_trt_engine()

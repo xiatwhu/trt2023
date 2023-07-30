@@ -107,22 +107,16 @@ def input_first(network, weight_map, pre, h):
 
 def group_norm(network, weight_map, h, pre, epsilon=EPS, silu=False):
     ch = h.get_output(0).shape[1]
-    print("00000000 ", ch)
     # plugin_creator = trt.get_plugin_registry().get_plugin_creator('GroupNorm', "1")
     plugin_creator = gn_plugin_creator
-    print("11111111 ", plugin_creator)
     s = network.add_constant([1, ch, 1, 1], weight_map['{}.weight'.format(pre)])
     b = network.add_constant([1, ch, 1, 1], weight_map['{}.bias'.format(pre)])
 
-    print("22222222 ", plugin_creator)
     eps_attr = trt.PluginField("epsilon", np.array([epsilon]), type=trt.PluginFieldType.FLOAT32)
     silu_attr = trt.PluginField("bSwish", np.array([1 if silu else 0]), type=trt.PluginFieldType.INT32)
     field_collection = trt.PluginFieldCollection([eps_attr, silu_attr])
 
-    print("33333333 ", plugin_creator)
     plugin = plugin_creator.create_plugin(name='{}.group_norm'.format(pre), field_collection=field_collection)
-    print("44444444 ", plugin_creator, plugin)
-    print('group_norm: ', plugin, pre, epsilon, silu)
     n = network.add_plugin_v2(inputs=[h.get_output(0), s.get_output(0), b.get_output(0)], plugin=plugin)
 
     return n
@@ -673,10 +667,10 @@ def create_unet_input_engine(weight_map, embed_weight, context):
     hs.append(h)
 
     for i in range(len(hs)):
+        network.mark_output(hs[i].get_output(0))
         hs[i].get_output(0).name = 'h{}'.format(i + 1)
         hs[i].get_output(0).dtype = trt.DataType.HALF
-        hs[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)
-        network.mark_output(hs[i].get_output(0))
+        hs[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)   
     
     # builder.max_batch_size = 1
     config.max_workspace_size = 1<<30
@@ -702,10 +696,10 @@ def create_control_engine(weight_map, embed_weight, context):
     control = control_net(network, weight_map, embed_weight, h, hint, t_emb, context)
 
     for i in range(len(control)):
+        network.mark_output(control[i].get_output(0))
         control[i].get_output(0).name = 'c{}'.format(i + 1)
         control[i].get_output(0).dtype = trt.DataType.HALF
-        control[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)
-        network.mark_output(control[i].get_output(0))
+        control[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)  
     
     # builder.max_batch_size = 1
     config.max_workspace_size = 1<<30

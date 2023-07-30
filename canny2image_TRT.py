@@ -234,6 +234,7 @@ class hackathon():
                 dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
                 img = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt
             
+            self.tensors['x'].copy_(img)
             cudart.cudaGraphLaunch(self.vae_instance, self.stream)
 
 

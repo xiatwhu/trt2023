@@ -152,8 +152,14 @@ class hackathon():
             detected_map = self.apply_canny(img, low_threshold, high_threshold)
             detected_map = HWC3(detected_map)
 
+            if detected_map.sum() / 255.0 > 25000.0:
+                index_list = [19, 18, 17, 16, 15, 14, 13, 11, 9, 6, 3]
+            else:
+                index_list = [19, 18, 17, 16, 15, 14, 13, 11, 8, 4]
+
             control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
             control = torch.unsqueeze(control, 0)
+            # print('canny: ', control.sum(), detected_map.sum() / 255.0)
 
             if seed == -1:
                 seed = random.randint(0, 65535)
@@ -210,15 +216,15 @@ class hackathon():
 
                 # if index in [19, 18, 17, 16, 15, 14, 13, 11, 8, 4]: # 5.287159632408505
                 # if index in [19, 18, 17, 16, 15, 14, 13, 10, 7, 3]:   # 5.426477961956595
-                # if index in [19, 18, 17, 16, 15, 14, 13, 10, 7, 4]:   # 5.493245796290085
+                # if index in [19, 18, 17, 16, 15, 14, 12, 9, 6, 3]:   # 5.493245796290085
 
                 ## 跑 9 个 step
                 # if index in [19, 18, 17, 16, 15, 14, 12, 10, 5]: # 6.021245215522073
                 # if index in [19, 18, 17, 16, 15, 14, 13, 10, 5]: # 5.811215823737912
-                if index in [19, 18, 17, 16, 15, 14, 12, 8, 4]: # 5.610201291122897
+                # if index in [19, 18, 17, 16, 15, 14, 12, 8, 4]: # 5.610201291122897
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 5]: # 5.724937136374654
 
-                    # if index not in [13]:
+                if index in index_list:
                     cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
                     cudart.cudaEventRecord(self.event1, self.stream1)
                     cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)

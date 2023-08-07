@@ -102,7 +102,6 @@ def conv(network, weight_map, x, ch, pre, kernel, padding, stride):
 
 def input_first(network, weight_map, pre, h):
     h = conv(network, weight_map, h, 320, '{}.input_blocks.0.0'.format(pre), 3, 1, 1)
-    # h.precision = trt.DataType.FLOAT
     return h
 
 def group_norm(network, weight_map, h, pre, epsilon=EPS, silu=False):
@@ -112,8 +111,8 @@ def group_norm(network, weight_map, h, pre, epsilon=EPS, silu=False):
     s = network.add_constant([1, ch, 1, 1], weight_map['{}.weight'.format(pre)])
     b = network.add_constant([1, ch, 1, 1], weight_map['{}.bias'.format(pre)])
 
-    eps_attr = trt.PluginField("epsilon", np.array([epsilon]), type=trt.PluginFieldType.FLOAT32)
-    silu_attr = trt.PluginField("bSwish", np.array([1 if silu else 0]), type=trt.PluginFieldType.INT32)
+    eps_attr = trt.PluginField("epsilon", np.array([epsilon], dtype=np.float32), type=trt.PluginFieldType.FLOAT32)
+    silu_attr = trt.PluginField("bSwish", np.array([1 if silu else 0], dtype=np.int32), type=trt.PluginFieldType.INT32)
     field_collection = trt.PluginFieldCollection([eps_attr, silu_attr])
 
     plugin = plugin_creator.create_plugin(name='{}.group_norm'.format(pre), field_collection=field_collection)
@@ -634,8 +633,10 @@ def create_unet_output_engine(weight_map, embed_weight, context):
     network.mark_output(x.get_output(0))
 
     # builder.max_batch_size = 1
-    config.max_workspace_size = 1<<30
+    config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
+    # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network
@@ -673,8 +674,10 @@ def create_unet_input_engine(weight_map, embed_weight, context):
         hs[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)   
     
     # builder.max_batch_size = 1
-    config.max_workspace_size = 1<<30
+    config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
+    # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network
@@ -702,8 +705,10 @@ def create_control_engine(weight_map, embed_weight, context):
         control[i].get_output(0).allowed_formats = 1 << int(trt.TensorFormat.HWC8)  
     
     # builder.max_batch_size = 1
-    config.max_workspace_size = 1<<30
+    config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
+    # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network

@@ -16,10 +16,6 @@ from cldm.model import create_model, load_state_dict
 from cuda import cudart
 from transformers import CLIPTokenizer
 
-from trt.clip_trt import CLIPTrt
-from trt.vae_trt import VAETrt
-from trt.ddim_trt import DDIMTrt
-
 import tensorrt as trt
 
 trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -30,6 +26,8 @@ trt.init_libnvinfer_plugins(trt_logger, '')
 
 # torch.backends.cuda.matmul.allow_tf32 = True
 # torch.backends.cudnn.allow_tf32 = True
+
+useGraph = True
 
 class hackathon():
 
@@ -47,6 +45,9 @@ class hackathon():
         self.ddim_alphas_prev_sub_sqrt = np.sqrt(1. - self.ddim_alphas_prev)
         self.ddim_sigmas = 0 * self.ddim_alphas_prev
         self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
+
+        self.a0 = self.ddim_alphas_prev_sqrt / self.ddim_alphas_sqrt
+        self.a1 = self.ddim_alphas_prev_sub_sqrt - self.ddim_alphas_prev_sqrt * self.ddim_sqrt_one_minus_alphas / self.ddim_alphas_sqrt
 
         # del model
 
@@ -102,21 +103,16 @@ class hackathon():
         self.event1 = cudart.cudaEventCreateWithFlags(cudart.cudaEventDisableTiming)[1]
 
         self.clip_instance = self.load_engine('sd_clip', self.stream1)
-        # self.hint_instance = self.load_engine('sd_hint', self.stream)
-        # self.vae_instance = self.load_engine('sd_vae_fp16_native', self.stream)
         self.vae_instance = self.load_engine('sd_vae_fp16', self.stream)
-
-        # self.vae_instance = self.load_engine('sd_vae', self.stream)
-
-        # self.control_graph_instance = self.load_engine('sd_control', self.stream)
-        # self.unet_input_graph_instance = self.load_engine('sd_unet_input', self.stream)
-        # self.unet_output_graph_instance = self.load_engine('sd_unet_output', self.stream)
 
         self.control_fp16_graph_instance = self.load_engine('sd_control_fp16', self.stream1)
         self.unet_input_fp16_graph_instance = self.load_engine('sd_unet_input_fp16', self.stream)
         self.unet_output_fp16_graph_instance = self.load_engine('sd_unet_output_fp16', self.stream)
 
         torch.cuda.set_stream(torch.cuda.ExternalStream(int(self.stream)))
+
+        import time
+        time.sleep(60 * 2)
 
     def load_engine(self, model, stream):
         trt_logger = trt.Logger(trt.Logger.INFO)
@@ -137,11 +133,14 @@ class hackathon():
 
             trt_ctx.execute_async_v3(stream)
             
-            cudart.cudaStreamBeginCapture(stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
-            trt_ctx.execute_async_v3(stream)
-            graph = cudart.cudaStreamEndCapture(stream)[1]
-            graph_instance = cudart.cudaGraphInstantiate(graph, 0)[1]
-            # graph_instance = None
+            if useGraph:
+                cudart.cudaStreamBeginCapture(stream, cudart.cudaStreamCaptureMode.cudaStreamCaptureModeGlobal)
+                trt_ctx.execute_async_v3(stream)
+                graph = cudart.cudaStreamEndCapture(stream)[1]
+                graph_instance = cudart.cudaGraphInstantiate(graph, 0)[1]
+            else:
+                graph_instance = None
+
             self.engine_context_map[model] = trt_ctx
         return graph_instance
 
@@ -151,11 +150,6 @@ class hackathon():
 
             detected_map = self.apply_canny(img, low_threshold, high_threshold)
             detected_map = HWC3(detected_map)
-
-            if detected_map.sum() / 255.0 > 25000.0:
-                index_list = [19, 18, 17, 16, 15, 14, 13, 11, 9, 6, 3]
-            else:
-                index_list = [19, 18, 17, 16, 15, 14, 13, 11, 8, 4]
 
             control = torch.from_numpy(detected_map.copy()).float().cuda() / 255.0
             control = torch.unsqueeze(control, 0)
@@ -173,7 +167,11 @@ class hackathon():
             self.tensors["input_ids"].copy_(batch_encoding["input_ids"])
             cudart.cudaEventRecord(self.event, self.stream)
             cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
-            cudart.cudaGraphLaunch(self.clip_instance, self.stream1)
+            if useGraph:
+                cudart.cudaGraphLaunch(self.clip_instance, self.stream1)
+            else:
+                self.engine_context_map['sd_clip'].execute_async_v3(self.stream1)
+
             cudart.cudaEventRecord(self.event1, self.stream1)
             # cudart.cudaGraphLaunch(self.hint_instance, self.stream)
 
@@ -185,16 +183,14 @@ class hackathon():
             cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
 
             for index in reversed(range(20)):
-                t_emb = torch.full((1, ), index, device=self.device, dtype=torch.int32)
-                self.tensors['t_emb'].copy_(t_emb)
                 self.tensors['x'].copy_(img)
-                cudart.cudaEventRecord(self.event, self.stream)
-                
-                cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
-                
+
+                # if True:
                 ## 跑 12 个 step
                 # if index in [19, 18, 17, 16, 15, 14, 13, 12, 9, 6, 3, 0]: # 4.993117427548901
                 # if index in [19, 18, 17, 16, 15, 14, 13, 11, 9, 6, 3, 0]: # 4.823739027404583
+                # if index in [19, 18, 17, 16, 15, 14, 13, 12, 11, 9, 6, 3]:    # 4.596818284133821
+                # if index in [19, 18, 17, 16, 15, 14, 13, 12, 10, 8, 6, 3]:      # 4.503659897417926
 
                 ## 跑 11 个 step
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 6, 3, 0]: # 5.3313205394989325
@@ -205,15 +201,6 @@ class hackathon():
                 # if index in [19, 18, 17, 16, 15, 14, 13, 11, 9, 7, 3]:  # 5.00344845752016
 
                 ## 跑 10 个 step
-                # if index in [19, 18, 17, 16, 15, 14, 13, 10, 5, 0]: # 5.82819636733392
-                # if index in [19, 18, 17, 16, 15, 14, 13, 11, 7, 0]: # 5.82819636733392
-                
-                # if index in [19, 18, 17, 16, 15, 13, 11, 8, 4, 0]: # 5.484956360644748
-                # if index in [19, 18, 17, 16, 14, 12, 9, 6, 3, 0]:  # 5.532044607929889
-                # if index in [19, 18, 17, 16, 15, 12, 9, 6, 3, 0]:  # 5.696516972558076
-                # if index in [19, 18, 17, 15, 13, 11, 9, 6, 3, 0]: # 5.715132846621001
-                # if index in [19, 18, 17, 16, 15, 14, 12, 9, 5, 0]: # 5.82819636733392
-
                 # if index in [19, 18, 17, 16, 15, 14, 13, 11, 8, 4]: # 5.287159632408505
                 # if index in [19, 18, 17, 16, 15, 14, 13, 10, 7, 3]:   # 5.426477961956595
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 6, 3]:   # 5.493245796290085
@@ -223,26 +210,39 @@ class hackathon():
                 # if index in [19, 18, 17, 16, 15, 14, 13, 10, 5]: # 5.811215823737912
                 # if index in [19, 18, 17, 16, 15, 14, 12, 8, 4]: # 5.610201291122897
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 5]: # 5.724937136374654
+                if index in [19, 18, 17, 16, 15, 13, 11, 8, 4]:
+                    t_emb = torch.full((1, ), index, device=self.device, dtype=torch.int32)
+                    self.tensors['t_emb'].copy_(t_emb)
+                    cudart.cudaEventRecord(self.event, self.stream)
+                    cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
 
-                if index in index_list:
-                    cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
-                    cudart.cudaEventRecord(self.event1, self.stream1)
-                    cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
-                    cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
-                    cudart.cudaGraphLaunch(self.unet_output_fp16_graph_instance, self.stream)
+                    if useGraph:
+                        cudart.cudaGraphLaunch(self.control_fp16_graph_instance, self.stream1)
+                        cudart.cudaEventRecord(self.event1, self.stream1)
+                        cudart.cudaGraphLaunch(self.unet_input_fp16_graph_instance, self.stream)
+                        cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
+                        cudart.cudaGraphLaunch(self.unet_output_fp16_graph_instance, self.stream)
+                    else:
+                        self.engine_context_map['sd_control_fp16'].execute_async_v3(self.stream1)
+                        cudart.cudaEventRecord(self.event1, self.stream1)
+                        self.engine_context_map['sd_unet_input_fp16'].execute_async_v3(self.stream)
+                        cudart.cudaStreamWaitEvent(self.stream, self.event1, cudart.cudaEventWaitDefault)
+                        self.engine_context_map['sd_unet_output_fp16'].execute_async_v3(self.stream)
 
                     model_t, model_uncond = self.tensors['out'].chunk(2)
                     model_output = model_uncond + scale * (model_t - model_uncond)
 
-                e_t = model_output
-
-                pred_x0 = (self.tensors['x'] - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
-                dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
-                img = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt
+                # e_t = model_output
+                # pred_x0 = (self.tensors['x'] - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
+                # dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
+                # img = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt
+                img = self.a0[index] * self.tensors['x'] + self.a1[index] * model_output
             
             self.tensors['x'].copy_(img)
-            cudart.cudaGraphLaunch(self.vae_instance, self.stream)
-
+            if useGraph:
+                cudart.cudaGraphLaunch(self.vae_instance, self.stream)
+            else:
+                self.engine_context_map['sd_vae_fp16'].execute_async_v3(self.stream)
 
             cudart.cudaStreamSynchronize(self.stream)
             cudart.cudaStreamSynchronize(self.stream1)

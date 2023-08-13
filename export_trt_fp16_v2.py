@@ -636,7 +636,7 @@ def create_unet_output_engine(weight_map, embed_weight, context):
     config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
     # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-    config.builder_optimization_level = 4
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network
@@ -677,7 +677,7 @@ def create_unet_input_engine(weight_map, embed_weight, context):
     config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
     # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-    config.builder_optimization_level = 4
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network
@@ -708,7 +708,7 @@ def create_control_engine(weight_map, embed_weight, context):
     config.max_workspace_size = 2<<30
     config.set_flag(trt.BuilderFlag.FP16)
     # config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
-    config.builder_optimization_level = 4
+    # config.builder_optimization_level = 4
     engine = builder.build_engine(network, config)
 
     del network

@@ -36,6 +36,9 @@ class hackathon():
         self.model = create_model('./models/cldm_v15.yaml').cpu()
         self.model.load_state_dict(load_state_dict('/home/player/ControlNet/models/control_sd15_canny.pth', location='cuda'))
         self.model = self.model.cuda()
+
+        self.device = torch.device('cuda')
+
         ddim_timesteps = np.asarray(list(range(0, 1000, 50))) + 1
         alphacums = self.model.alphas_cumprod.cpu().numpy()
         self.ddim_alphas = alphacums[ddim_timesteps]
@@ -46,14 +49,28 @@ class hackathon():
         self.ddim_sigmas = 0 * self.ddim_alphas_prev
         self.ddim_sqrt_one_minus_alphas = np.sqrt(1. - self.ddim_alphas)
 
+        self.sqrt_one_minus_at = []
+        self.sqrt_one_minus_a_prev = []
+        self.sqrt_a_prev = []
+        self.sqrt_at = []
+        self.t_emb = []
+
+        for index in range(20):
+            a_t = torch.full((1, 1, 1, 1), self.ddim_alphas[index], device=self.device)
+            a_prev = torch.full((1, 1, 1, 1), self.ddim_alphas_prev[index], device=self.device)
+            self.sqrt_one_minus_at.append(torch.full((1, 1, 1, 1), self.ddim_sqrt_one_minus_alphas[index], device=self.device))
+            self.sqrt_one_minus_a_prev.append((1. - a_prev).sqrt())
+            self.sqrt_a_prev.append(a_prev.sqrt())
+            self.sqrt_at.append(a_t.sqrt())
+            self.t_emb.append(torch.full((1, ), index, device=self.device, dtype=torch.int32))
+
         self.a0 = self.ddim_alphas_prev_sqrt / self.ddim_alphas_sqrt
         self.a1 = self.ddim_alphas_prev_sub_sqrt - self.ddim_alphas_prev_sqrt * self.ddim_sqrt_one_minus_alphas / self.ddim_alphas_sqrt
 
+        self.run_step = [19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
         # del model
 
         self.tokenizer = CLIPTokenizer.from_pretrained('openai/clip-vit-large-patch14')
-        
-        self.device = torch.device('cuda')
 
         self.tensors = {
             'input_ids': torch.ones(size=(2, 77), dtype=torch.int32, device=self.device),
@@ -211,8 +228,9 @@ class hackathon():
                 # if index in [19, 18, 17, 16, 15, 14, 12, 8, 4]: # 5.610201291122897
                 # if index in [19, 18, 17, 16, 15, 14, 12, 9, 5]: # 5.724937136374654
                 if index in [19, 18, 17, 16, 15, 13, 11, 8, 4]:
-                    t_emb = torch.full((1, ), index, device=self.device, dtype=torch.int32)
-                    self.tensors['t_emb'].copy_(t_emb)
+                # if index in self.run_step:
+                    
+                    self.tensors['t_emb'].copy_(self.t_emb[index])
                     cudart.cudaEventRecord(self.event, self.stream)
                     cudart.cudaStreamWaitEvent(self.stream1, self.event, cudart.cudaEventWaitDefault)
 
@@ -232,12 +250,23 @@ class hackathon():
                     model_t, model_uncond = self.tensors['out'].chunk(2)
                     model_output = model_uncond + scale * (model_t - model_uncond)
 
-                # e_t = model_output
+                e_t = model_output
                 # pred_x0 = (self.tensors['x'] - self.ddim_sqrt_one_minus_alphas[index] * e_t) / self.ddim_alphas_sqrt[index]
                 # dir_xt = self.ddim_alphas_prev_sub_sqrt[index] * e_t
                 # img = self.ddim_alphas_prev_sqrt[index] * pred_x0 + dir_xt
-                img = self.a0[index] * self.tensors['x'] + self.a1[index] * model_output
+                # img = self.a0[index] * self.tensors['x'] + self.a1[index] * model_output
             
+                # a_t = torch.full((1, 1, 1, 1), self.ddim_alphas[index], device=self.device)
+                # a_prev = torch.full((1, 1, 1, 1), self.ddim_alphas_prev[index], device=self.device)
+                # sqrt_one_minus_at = torch.full((1, 1, 1, 1), self.ddim_sqrt_one_minus_alphas[index],device=self.device)
+                # sqrt_one_minus_a_prev = (1. - a_prev).sqrt()
+                # sqrt_a_prev = a_prev.sqrt()
+                # sqrt_at = a_t.sqrt()
+
+                pred_x0 = (self.tensors['x'] - self.sqrt_one_minus_at[index] * e_t) / self.sqrt_at[index]
+                dir_xt = self.sqrt_one_minus_a_prev[index] * e_t
+                img = self.sqrt_a_prev[index] * pred_x0 + dir_xt
+
             self.tensors['x'].copy_(img)
             if useGraph:
                 cudart.cudaGraphLaunch(self.vae_instance, self.stream)

@@ -10,6 +10,7 @@ image_log/
 *.ckpt
 *.safetensors
 !base/*.jpg
+!docs/*.jpg
 
 gradio_pose2image_private.py
 gradio_canny2image_private.py
